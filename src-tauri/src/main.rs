@@ -523,6 +523,21 @@ async fn app_action(serial: String, package: String, action: String) -> Result<S
     if !valid_package(&package) {
         return Err("اسم حزمة غير صالح".into());
     }
+    if action == "clear_cache" {
+        let script = format!(
+            "sdk=$(getprop ro.build.version.sdk); if [ \"$sdk\" -ge 30 ]; then pm clear --cache-only --user 0 {package}; else pm trim-caches 999999999999; echo TRIM_ALL; fi"
+        );
+        let out = adb(vec![s("-s"), serial, s("shell"), script]).await?;
+        let text = out.trim();
+        if text.contains("Failure") || text.contains("Failed") || text.contains("Exception") {
+            return Err(text.to_string());
+        }
+        if text.contains("TRIM_ALL") {
+            return Ok("تم تنظيف كاش جميع التطبيقات (مسح كاش تطبيق واحد متاح من Android 11+)".into());
+        }
+        return Ok(text.to_string());
+    }
+
     let mut args = vec![
         s("-s"),
         serial,
@@ -541,6 +556,7 @@ async fn app_action(serial: String, package: String, action: String) -> Result<S
             package,
         ]),
         "clear_data" => args.extend([s("clear"), s("--user"), s("0"), package]),
+        "clear_cache" => args.extend([s("clear"), s("--cache-only"), s("--user"), s("0"), package]),
         _ => return Err("إجراء غير معروف".into()),
     }
     let out = adb(args).await?;
@@ -648,14 +664,15 @@ async fn extract_apk(serial: String, package: String) -> Result<String, String> 
         .map_err(|e| format!("خطأ داخلي: {e}"))?
 }
 
-fn extract_apks_from_zip(
+fn extract_apk_groups(
     zip_path: &str,
     dest: &std::path::Path,
-    out: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<Vec<(String, Vec<String>)>, String> {
     let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("ملف حزمة غير صالح: {e}"))?;
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         if entry.is_dir() {
@@ -665,13 +682,21 @@ fn extract_apks_from_zip(
         if !name.to_lowercase().ends_with(".apk") {
             continue;
         }
+        let group = if name.contains('/') {
+            name.split('/').next().unwrap_or("app").to_string()
+        } else {
+            "app".to_string()
+        };
         let file_name = sanitize_file_name(name.rsplit('/').next().unwrap_or("part.apk"));
-        let target = dest.join(file_name);
+        let target = dest.join(format!("{}-{}", sanitize_file_name(&group), file_name));
         let mut output = std::fs::File::create(&target).map_err(|e| e.to_string())?;
         std::io::copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
-        out.push(target.to_string_lossy().to_string());
+        groups
+            .entry(group)
+            .or_default()
+            .push(target.to_string_lossy().to_string());
     }
-    Ok(())
+    Ok(groups.into_iter().collect())
 }
 
 fn install_apks_blocking(
@@ -679,60 +704,100 @@ fn install_apks_blocking(
     paths: Vec<String>,
     reinstall: bool,
 ) -> Result<String, String> {
-    let mut apks: Vec<String> = Vec::new();
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     let mut temp_dirs: Vec<std::path::PathBuf> = Vec::new();
 
     for path in paths {
         let lower = path.to_lowercase();
+        if !std::path::Path::new(&path).exists() {
+            return Err(format!("الملف غير موجود: {path}"));
+        }
         if lower.ends_with(".apk") {
-            if !std::path::Path::new(&path).exists() {
-                return Err(format!("الملف غير موجود: {path}"));
-            }
-            apks.push(path);
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "app.apk".to_string());
+            groups.push((name, vec![path]));
         } else if lower.ends_with(".apks") || lower.ends_with(".xapk") || lower.ends_with(".zip") {
-            if !std::path::Path::new(&path).exists() {
-                return Err(format!("الملف غير موجود: {path}"));
-            }
             let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
             let tmp = cache_dir().join("install").join(format!("{}-{n}", timestamp()));
             std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-            extract_apks_from_zip(&path, &tmp, &mut apks)?;
+            let mut extracted = extract_apk_groups(&path, &tmp)?;
+            groups.append(&mut extracted);
             temp_dirs.push(tmp);
         } else {
             return Err(format!("صيغة غير مدعومة: {path}"));
         }
     }
 
-    if apks.is_empty() {
+    if groups.is_empty() {
         for dir in &temp_dirs {
             let _ = std::fs::remove_dir_all(dir);
         }
         return Err("لم يتم العثور على ملفات APK للتثبيت".into());
     }
 
-    let mut args = vec![s("-s"), serial.to_string()];
-    if apks.len() == 1 {
-        args.push(s("install"));
+    let mut ok = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for (group_index, (group_name, files)) in groups.iter().enumerate() {
+        let mut remote: Vec<String> = Vec::new();
+        let mut upload_failed = false;
+        for (index, file) in files.iter().enumerate() {
+            let dst = format!("/data/local/tmp/adbcontrol-install-{group_index}-{index}.apk");
+            match run_adb(&[
+                s("-s"),
+                serial.to_string(),
+                s("push"),
+                file.clone(),
+                dst.clone(),
+            ]) {
+                Ok(_) => remote.push(dst),
+                Err(e) => {
+                    failures.push(format!("{group_name}: {e}"));
+                    upload_failed = true;
+                    break;
+                }
+            }
+        }
+        if upload_failed || remote.is_empty() {
+            continue;
+        }
+
+        let mut args = vec![
+            s("-s"),
+            serial.to_string(),
+            if remote.len() == 1 { s("install") } else { s("install-multiple") },
+        ];
         if reinstall {
             args.push(s("-r"));
         }
-        args.push(apks[0].clone());
-    } else {
-        args.push(s("install-multiple"));
-        if reinstall {
-            args.push(s("-r"));
+        args.extend(remote.iter().cloned());
+
+        match run_adb(&args) {
+            Ok(out) if !out.contains("Failure") => ok += 1,
+            Ok(out) => failures.push(format!("{group_name}: {}", out.trim())),
+            Err(e) => failures.push(format!("{group_name}: {e}")),
         }
-        args.extend(apks.iter().cloned());
+        let _ = run_adb(&[
+            s("-s"),
+            serial.to_string(),
+            s("shell"),
+            s("rm"),
+            s("-f"),
+            remote.join(" "),
+        ]);
     }
 
-    let out = run_adb(&args)?;
     for dir in &temp_dirs {
         let _ = std::fs::remove_dir_all(dir);
     }
-    if out.contains("Failure") {
-        return Err(out.trim().to_string());
+
+    let mut summary = format!("تم تثبيت {ok}/{} حزمة", groups.len());
+    if let Some(first) = failures.first() {
+        summary.push_str("\n");
+        summary.push_str(first);
     }
-    Ok(out.trim().to_string())
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -822,19 +887,47 @@ fn sync_bridge_blocking(serial: &str) -> Result<String, String> {
     .unwrap_or(false);
 
     if !installed {
-        let out = run_adb(&[
+        let install_args = &[
             s("-s"),
             serial.to_string(),
             s("install"),
             s("-r"),
             apk_path.to_string_lossy().to_string(),
-        ])?;
+        ];
+        let out = run_adb(install_args)?;
         if out.contains("Failure") {
-            return Err(out);
+            // Older bridge builds may be signed with a different key.
+            let _ = run_adb(&[s("-s"), serial.to_string(), s("uninstall"), s(BRIDGE_PKG)]);
+            let retry = run_adb(install_args)?;
+            if retry.contains("Failure") {
+                return Err(retry);
+            }
         }
     }
 
-    let remote = bridge_remote_dir();
+    let _ = run_adb(&[
+        s("-s"),
+        serial.to_string(),
+        s("shell"),
+        s("pm"),
+        s("grant"),
+        s(BRIDGE_PKG),
+        s("android.permission.WRITE_EXTERNAL_STORAGE"),
+    ]);
+    let sdk_out = run_adb(&[
+        s("-s"),
+        serial.to_string(),
+        s("shell"),
+        s("getprop"),
+        s("ro.build.version.sdk"),
+    ])
+    .unwrap_or_default();
+    let sdk: i32 = sdk_out.trim().parse().unwrap_or(0);
+    let remote = if sdk < 29 {
+        "/sdcard/Download/ADBControlBridge".to_string()
+    } else {
+        bridge_remote_dir()
+    };
     let ready = format!("{remote}/ready");
     let _ = run_adb(&[s("-s"), serial.to_string(), s("shell"), s("rm"), s("-f"), ready.clone()]);
     let _ = run_adb(&[
@@ -845,18 +938,31 @@ fn sync_bridge_blocking(serial: &str) -> Result<String, String> {
         s("force-stop"),
         s(BRIDGE_PKG),
     ]);
-    run_adb(&[
+    let trigger = run_adb(&[
         s("-s"),
         serial.to_string(),
         s("shell"),
-        s("am"),
-        s("start"),
-        s("-n"),
-        s("com.adbappcontrol.bridge/.MainActivity"),
-    ])?;
+        s("content"),
+        s("call"),
+        s("--uri"),
+        s("content://com.adbappcontrol.bridge.export"),
+        s("--method"),
+        s("export"),
+    ]);
+    if trigger.is_err() {
+        let _ = run_adb(&[
+            s("-s"),
+            serial.to_string(),
+            s("shell"),
+            s("am"),
+            s("start"),
+            s("-n"),
+            s("com.adbappcontrol.bridge/.MainActivity"),
+        ]);
+    }
 
     let mut finished = false;
-    for _ in 0..140 {
+    for _ in 0..360 {
         std::thread::sleep(Duration::from_millis(500));
         if let Ok(out) = run_adb(&[
             s("-s"),
@@ -961,6 +1067,345 @@ async fn get_icon(serial: String, package: String) -> Result<Option<String>, Str
 }
 
 #[tauri::command]
+async fn discover_devices() -> Result<Vec<String>, String> {
+    let raw = adb(vec![s("mdns"), s("services")]).await.unwrap_or_default();
+    let mut endpoints: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        if !line.contains("_adb") {
+            continue;
+        }
+        if let Some(token) = line.split_whitespace().last() {
+            let looks_like_endpoint = token.contains(':')
+                && token.chars().any(|c| c.is_ascii_digit())
+                && !token.contains('_');
+            if looks_like_endpoint && !endpoints.iter().any(|e| e == token) {
+                endpoints.push(token.to_string());
+            }
+        }
+    }
+    for endpoint in &endpoints {
+        let _ = adb(vec![s("connect"), endpoint.clone()]).await;
+    }
+    Ok(endpoints)
+}
+
+#[tauri::command]
+async fn scan_lan() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use std::net::{TcpStream, UdpSocket};
+        let probe = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+        probe.connect("8.8.8.8:80").map_err(|e| e.to_string())?;
+        let local = probe.local_addr().map_err(|e| e.to_string())?;
+        let std::net::IpAddr::V4(v4) = local.ip() else {
+            return Ok(Vec::new());
+        };
+        let o = v4.octets();
+        let mut handles = Vec::new();
+        for host in 1..=254u8 {
+            let addr = std::net::SocketAddr::from(([o[0], o[1], o[2], host], 5555));
+            handles.push(std::thread::spawn(move || {
+                let timeout = std::time::Duration::from_millis(180);
+                if TcpStream::connect_timeout(&addr, timeout).is_ok() {
+                    Some(format!("{}:5555", addr.ip()))
+                } else {
+                    None
+                }
+            }));
+        }
+        let mut found = Vec::new();
+        for handle in handles {
+            if let Ok(Some(endpoint)) = handle.join() {
+                let _ = run_adb(&[s("connect"), endpoint.clone()]);
+                found.push(endpoint);
+            }
+        }
+        found.sort();
+        Ok(found)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Clone, Serialize, serde::Deserialize)]
+struct CytProfileData {
+    id: String,
+    title: String,
+    #[serde(default)]
+    os: String,
+    #[serde(default)]
+    brand: String,
+    #[serde(default)]
+    header: String,
+    #[serde(default)]
+    packages: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CytProfile {
+    id: String,
+    title: String,
+    os: String,
+    brand: String,
+}
+
+static EMBEDDED_PROFILES: &str = include_str!("../cleanyourtv/profiles.json");
+
+fn cyt_data() -> Vec<CytProfileData> {
+    let cache = cache_dir().join("cleanyourtv").join("profiles.json");
+    if let Ok(raw) = std::fs::read_to_string(cache) {
+        if let Ok(list) = serde_json::from_str::<Vec<CytProfileData>>(&raw) {
+            if !list.is_empty() {
+                return list;
+            }
+        }
+    }
+    serde_json::from_str(EMBEDDED_PROFILES).unwrap_or_default()
+}
+
+fn valid_pkg(pkg: &str) -> bool {
+    pkg.contains('.')
+        && pkg.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+}
+
+fn parse_profile_text(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let cleaned = line
+            .trim_start_matches('\u{feff}')
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if cleaned.is_empty() {
+            continue;
+        }
+        let pkg = cleaned.split_whitespace().next().unwrap_or("");
+        if valid_pkg(pkg) && !out.iter().any(|p| p == pkg) {
+            out.push(pkg.to_string());
+        }
+    }
+    out
+}
+
+#[tauri::command]
+async fn debloat_fetch() -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use std::io::Read;
+
+        let dir = cache_dir().join("cleanyourtv");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let zip_path = dir.join("cleanyourtv.zip");
+        let zip_arg = zip_path.to_string_lossy().to_string();
+        let status = Command::new("curl")
+            .args([
+                "-L",
+                "--fail",
+                "-o",
+                zip_arg.as_str(),
+                "https://codeload.github.com/Gathin23/cleanyourtv/zip/refs/heads/main",
+            ])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err("فشل تنزيل قوائم CleanYourTV — تحقق من الاتصال".into());
+        }
+
+        let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let mut map: std::collections::BTreeMap<String, CytProfileData> =
+            std::collections::BTreeMap::new();
+
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = entry.name().to_string();
+            let Some(rest) = name.split_once("/examples/").map(|(_, r)| r) else {
+                continue;
+            };
+            let parts: Vec<&str> = rest.split('/').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let id = parts[0].to_string();
+            let file_name = parts[1];
+
+            if file_name == "tv.json" {
+                let mut text = String::new();
+                let _ = entry.read_to_string(&mut text);
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    let profile = map.entry(id.clone()).or_insert_with(|| CytProfileData {
+                        id: id.clone(),
+                        title: id.clone(),
+                        os: String::new(),
+                        brand: String::new(),
+                        header: String::new(),
+                        packages: Vec::new(),
+                    });
+                    profile.title = v.get("tv").and_then(|x| x.as_str()).unwrap_or(&id).to_string();
+                    profile.os = v.get("os").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    profile.brand = v.get("brand").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                }
+            } else if file_name.starts_with("debloat") && file_name.ends_with(".txt") {
+                let mut text = String::new();
+                let _ = entry.read_to_string(&mut text);
+                let header: String = text
+                    .lines()
+                    .take(35)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(1600)
+                    .collect();
+                let profile = map.entry(id.clone()).or_insert_with(|| CytProfileData {
+                    id: id.clone(),
+                    title: id.clone(),
+                    os: String::new(),
+                    brand: String::new(),
+                    header: String::new(),
+                    packages: Vec::new(),
+                });
+                profile.header = header;
+                profile.packages = parse_profile_text(&text);
+            }
+        }
+        let _ = std::fs::remove_file(&zip_path);
+
+        let list: Vec<CytProfileData> = map
+            .into_values()
+            .filter(|p| !p.packages.is_empty())
+            .collect();
+        let json = serde_json::to_string(&list).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("profiles.json"), json).map_err(|e| e.to_string())?;
+        Ok(list.len())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn debloat_profiles() -> Result<Vec<CytProfile>, String> {
+    let mut profiles: Vec<CytProfile> = cyt_data()
+        .into_iter()
+        .map(|p| CytProfile {
+            id: p.id,
+            title: p.title,
+            os: p.os,
+            brand: p.brand,
+        })
+        .collect();
+    profiles.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    Ok(profiles)
+}
+
+#[tauri::command]
+async fn debloat_match(serial: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let get = |prop: &str| -> String {
+            run_adb(&[
+                s("-s"),
+                serial.clone(),
+                s("shell"),
+                s("getprop"),
+                s(prop),
+            ])
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+        };
+        let model = get("ro.product.model").to_lowercase();
+        let device = get("ro.product.device").to_lowercase();
+        let brand = get("ro.product.brand").to_lowercase();
+        if model.is_empty() && device.is_empty() {
+            return Ok(None);
+        }
+
+        let mut best: Option<(i32, String)> = None;
+        for profile in cyt_data() {
+            let haystack = format!("{} {} {}", profile.title, profile.header, profile.id).to_lowercase();
+            let mut score = 0i32;
+            if !model.is_empty() {
+                score += 8 * haystack.matches(model.as_str()).count() as i32;
+            }
+            if !device.is_empty() {
+                score += 8 * haystack.matches(device.as_str()).count() as i32;
+            }
+            if !brand.is_empty() {
+                score += 2 * haystack.matches(brand.as_str()).count() as i32;
+            }
+            if !model.is_empty() && profile.id.to_lowercase().contains(&model) {
+                score += 10;
+            }
+            if score > 0 && best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                best = Some((score, profile.id));
+            }
+        }
+        Ok(best.map(|(_, id)| id))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn debloat_packages(profile: String) -> Result<Vec<String>, String> {
+    cyt_data()
+        .into_iter()
+        .find(|p| p.id == profile)
+        .map(|p| p.packages)
+        .ok_or_else(|| "ملف تعريف غير موجود".to_string())
+}
+
+#[tauri::command]
+async fn debloat_apply(
+    serial: String,
+    profile: String,
+    enable: bool,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let packages = cyt_data()
+            .into_iter()
+            .find(|p| p.id == profile)
+            .map(|p| p.packages)
+            .ok_or_else(|| "ملف تعريف غير موجود".to_string())?;
+        if packages.is_empty() {
+            return Err("القائمة لا تحتوي على حزم".into());
+        }
+        let mut done = 0usize;
+        for pkg in &packages {
+            let args = if enable {
+                vec![
+                    s("-s"),
+                    serial.clone(),
+                    s("shell"),
+                    s("pm"),
+                    s("enable"),
+                    pkg.clone(),
+                ]
+            } else {
+                vec![
+                    s("-s"),
+                    serial.clone(),
+                    s("shell"),
+                    s("pm"),
+                    s("disable-user"),
+                    s("--user"),
+                    s("0"),
+                    pkg.clone(),
+                ]
+            };
+            if let Ok(out) = run_adb(&args) {
+                if !out.contains("Failure") && !out.contains("Exception") {
+                    done += 1;
+                }
+            }
+        }
+        let verb = if enable { "استعادة" } else { "تعطيل" };
+        Ok(format!("تم {verb} {done}/{} حزمة", packages.len()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn run_command(serial: String, command: String) -> Result<String, String> {
     if command.trim().is_empty() {
         return Err("أمر فارغ".into());
@@ -978,6 +1423,25 @@ async fn run_command(serial: String, command: String) -> Result<String, String> 
 fn main() {
     // Headless diagnostics: `adb-appcontrol-linux --selftest <serial>`
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--install") {
+        match (args.get(2), args.get(3)) {
+            (Some(serial), Some(path)) => {
+                match install_apks_blocking(serial, vec![path.clone()], true) {
+                    Ok(message) => println!("{message}"),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            _ => {
+                eprintln!("usage: --install <serial> <file.apk|file.apks|backup.zip>");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
     if args.iter().any(|a| a == "--extract") {
         match (args.get(2), args.get(3)) {
             (Some(serial), Some(package)) => match extract_apk_blocking(serial, package) {
@@ -1025,6 +1489,13 @@ fn main() {
             set_adb_path,
             list_devices,
             connect_device,
+            discover_devices,
+            scan_lan,
+            debloat_fetch,
+            debloat_profiles,
+            debloat_match,
+            debloat_packages,
+            debloat_apply,
             disconnect_device,
             device_info,
             list_apps,

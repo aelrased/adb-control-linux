@@ -347,3 +347,22 @@ table.apps tbody tr.selected { background: #16233a; }
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
 .toast.err { border-color: #57211f; color: #ffb4af; }
+
+.modal {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0, 0, 0, .55);
+  display: grid; place-items: center;
+}
+.modal-card {
+  width: min(620px, 92vw);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.55);
+}
+.modal-card h3 { margin: 0 0 6px; }
+.clean-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+.clean-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+#cytProfile { width: 100%; margin-bottom: 6px; }
+.muted.small { font-size: 11px; }

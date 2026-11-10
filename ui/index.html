@@ -51,6 +51,7 @@
           <button id="btnRefreshApps" class="quick">🔄<span>تحديث القائمة</span></button>
           <button id="btnIcons" class="quick">🎨<span>أيقونات التطبيقات</span></button>
           <button id="btnAdb" class="quick">⚙️<span>تحديد adb</span></button>
+          <button id="btnClean" class="quick">🧹<span>CleanYourTV</span></button>
           <button id="btnReboot" class="quick">⏻<span>إعادة تشغيل</span></button>
         </div>
       </section>
@@ -105,6 +106,7 @@
         <div class="actions">
           <button id="btnDisable" class="btn warn">تعطيل</button>
           <button id="btnEnable" class="btn ok">تفعيل</button>
+          <button id="btnClearCache" class="btn">مسح الكاش</button>
           <button id="btnClear" class="btn">مسح البيانات</button>
           <button id="btnUninstall" class="btn danger">حذف</button>
           <button id="btnSaveApk" class="btn">حفظ APK</button>
@@ -121,6 +123,25 @@
     <span id="footerDevice" class="muted">لا جهاز</span>
   </footer>
 
+
+  <div id="cleanModal" class="modal hidden">
+    <div class="modal-card">
+      <h3>CleanYourTV — تنظيف التلفزيون</h3>
+      <p id="cleanDevice" class="muted"></p>
+      <div class="clean-row">
+        <button id="cytFetch" class="btn">تحديث القوائم (اختياري)</button>
+        <span id="cytStatus" class="muted"></span>
+      </div>
+      <select id="cytProfile"></select>
+      <p id="cytCount" class="muted"></p>
+      <div class="clean-actions">
+        <button id="cytDisable" class="btn warn">تعطيل الحزم</button>
+        <button id="cytEnable" class="btn ok">استعادة الحزم</button>
+        <button id="cytClose" class="btn">إغلاق</button>
+      </div>
+      <p class="muted small">تعطيل فقط عبر pm disable-user — لا حذف. استخدم «استعادة الحزم» للتراجع.</p>
+    </div>
+  </div>
   <script src="app.js"></script>
 </body>
 </html>

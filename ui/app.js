@@ -99,8 +99,21 @@ async function chooseAdb() {
 }
 
 async function refreshDevices() {
-  const devices = await safe(() => invoke("list_devices"), "الأجهزة");
+  try {
+    const found = await invoke("discover_devices");
+    if (Array.isArray(found) && found.length) {
+      log(`اكتشاف تلقائي: ${found.join(", ")}`, "ok");
+    }
+  } catch (_) { /* mDNS تصغير غير مدعوم في بعض إصدارات adb */ }
+  let devices = await safe(() => invoke("list_devices"), "الأجهزة");
   if (!devices) return;
+  if (devices.length === 0) {
+    const lan = await safe(() => invoke("scan_lan"), "فحص الشبكة");
+    if (Array.isArray(lan) && lan.length) {
+      log(`تم العثور على أجهزة في الشبكة: ${lan.join(", ")}`, "ok");
+      devices = (await safe(() => invoke("list_devices"), "الأجهزة")) || devices;
+    }
+  }
   state.devices = devices;
   const select = $("deviceSelect");
   select.innerHTML = "";
@@ -117,9 +130,24 @@ async function refreshDevices() {
     opt.textContent = `${name} · ${d.state}${d.serial.includes(":") ? " (Wi‑Fi)" : ""}`;
     select.appendChild(opt);
   }
-  const preferred = devices.find((d) => d.state === "device") || devices[0];
-  if (!state.serial || !devices.some((d) => d.serial === state.serial)) {
-    state.serial = preferred.serial;
+  const authorized = devices.filter((d) => d.state === "device");
+  const unauthorized = devices.filter((d) => d.state !== "device");
+  if (unauthorized.length) {
+    log(
+      `أجهزة غير مصرح بها: ${unauthorized.map((d) => d.serial).join(", ")} — وافق على Allow debugging على الجهاز`,
+      "err"
+    );
+  }
+  const preferred = authorized[0] || null;
+  if (!state.serial || !authorized.some((d) => d.serial === state.serial)) {
+    state.serial = preferred ? preferred.serial : null;
+  }
+  if (!state.serial) {
+    select.innerHTML = '<option value="">— لا يوجد جهاز مصرح —</option>';
+    $("footerDevice").textContent = "لا جهاز";
+    renderDeviceInfo(null);
+    renderTable();
+    return;
   }
   select.value = state.serial;
   $("footerDevice").textContent = state.serial;
@@ -366,7 +394,7 @@ function toggleRow(pkg, on) {
 function updateSelectionUi() {
   $("selCount").textContent = state.selected.size;
   const has = state.selected.size > 0 && !state.busy;
-  ["btnDisable", "btnEnable", "btnClear", "btnUninstall", "btnSaveApk"].forEach((id) => {
+  ["btnDisable", "btnEnable", "btnClear", "btnClearCache", "btnUninstall", "btnSaveApk"].forEach((id) => {
     $(id).disabled = !has;
   });
   $("btnInstallApk").disabled = state.busy || !state.serial;
@@ -416,7 +444,7 @@ async function installApk() {
   setBusy(false);
   if (res !== null) {
     log(res, "ok");
-    toast("تم التثبيت بنجاح");
+    toast(res.split("\n")[0]);
   }
   await refreshApps();
 }
@@ -478,9 +506,95 @@ async function runCustomCommand() {
   input.value = "";
 }
 
+
+/* ---------- CleanYourTV ---------- */
+const cleanModal = $("cleanModal");
+
+async function openClean() {
+  if (!state.serial) {
+    toast("اختر جهازاً أولاً", true);
+    return;
+  }
+  cleanModal.classList.remove("hidden");
+  $("cleanDevice").textContent = `الجهاز: ${state.serial}`;
+  await loadCytProfiles();
+}
+
+async function loadCytProfiles() {
+  const profiles = await safe(() => invoke("debloat_profiles"), "CleanYourTV");
+  const select = $("cytProfile");
+  select.innerHTML = "";
+  for (const p of profiles || []) {
+    const option = document.createElement("option");
+    option.value = p.id;
+    option.textContent = `${p.title}${p.os ? " · " + p.os : ""}`;
+    select.appendChild(option);
+  }
+  $("cytStatus").textContent = profiles?.length
+    ? `${profiles.length} ملف تعريف مضمّن في البرنامج`
+    : "لا توجد قوائم — اضغط «تحميل / تحديث القوائم»";
+  if (!profiles?.length) {
+    $("cytCount").textContent = "";
+    return;
+  }
+  const matched = await safe(() => invoke("debloat_match", { serial: state.serial }), "مطابقة الجهاز");
+  if (matched) select.value = matched;
+  await updateCytCount();
+}
+
+async function updateCytCount() {
+  const profile = $("cytProfile").value;
+  if (!profile) return;
+  const packages = await safe(() => invoke("debloat_packages", { profile }), "قراءة القائمة");
+  $("cytCount").textContent = packages ? `${packages.length} حزمة في هذا الملف` : "";
+}
+
+async function fetchCyt() {
+  setBusy(true, "تنزيل قوائم CleanYourTV…");
+  const count = await safe(() => invoke("debloat_fetch"), "التنزيل");
+  setBusy(false);
+  if (count !== null) {
+    toast(`تم تجهيز ${count} ملف تعريف`);
+    await loadCytProfiles();
+  }
+}
+
+async function applyCyt(enable) {
+  const profile = $("cytProfile").value;
+  if (!profile) return toast("اختر ملف تعريف", true);
+  const ok = await dialog.confirm(
+    enable
+      ? "إعادة تفعيل الحزم الموجودة في هذا الملف؟"
+      : "تعطيل كل الحزم في هذا الملف؟ لن يتم حذف أي تطبيق، ويمكن الاستعادة لاحقاً.",
+    { title: "CleanYourTV", kind: enable ? "info" : "warning" }
+  );
+  if (!ok) return;
+  setBusy(true, enable ? "استعادة الحزم…" : "تعطيل الحزم…");
+  const res = await safe(
+    () => invoke("debloat_apply", { serial: state.serial, profile, enable }),
+    "CleanYourTV"
+  );
+  setBusy(false);
+  if (res !== null) {
+    log(res, "ok");
+    toast(res);
+    await refreshApps();
+  }
+}
+
+function wireClean() {
+  $("btnClean")?.addEventListener("click", () => openClean());
+  $("cytClose")?.addEventListener("click", () => cleanModal.classList.add("hidden"));
+  $("cytFetch")?.addEventListener("click", () => fetchCyt());
+  $("cytProfile")?.addEventListener("change", () => updateCytCount());
+  $("cytDisable")?.addEventListener("click", () => applyCyt(false));
+  $("cytEnable")?.addEventListener("click", () => applyCyt(true));
+}
+
 /* ---------------- Wiring ---------------- */
 
 function wire() {
+  wireClean();
   $("deviceSelect").addEventListener("change", async (e) => {
     state.serial = e.target.value || null;
     $("footerDevice").textContent = state.serial || "لا جهاز";
@@ -542,6 +656,7 @@ function wire() {
     applyToSelection("disable", "تعطيل التطبيقات المحددة؟ يمكن تفعيلها لاحقاً.")
   );
   $("btnEnable").addEventListener("click", () => applyToSelection("enable"));
+  $("btnClearCache").addEventListener("click", () => applyToSelection("clear_cache"));
   $("btnClear").addEventListener("click", () =>
     applyToSelection("clear_data", "مسح بيانات التطبيقات المحددة؟ لا يمكن التراجع.")
   );

@@ -4,6 +4,9 @@
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="28" />
 
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
     <application
         android:label="ADB Control Bridge"
         android:allowBackup="false"
@@ -18,5 +21,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <provider
+            android:name=".ExportProvider"
+            android:authorities="com.adbappcontrol.bridge.export"
+            android:exported="true" />
     </application>
 </manifest>

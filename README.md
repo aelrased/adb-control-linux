@@ -1,6 +1,6 @@
 # ADB Control Linux
 
-بديل حر ومفتوح المصدر لبرنامج **ADB AppControl** (Windows)، مبني بواجهة سطح مكتب
+بديل حر ومفتوح المصدر برنامج **ADB Control** (Windows)، مبني بواجهة سطح مكتب
 حديثة على **Tauri 2 + WebKitGTK** مع نواة **Rust**، ويعتمد على أداة `adb` الرسمية من
 Google (Apache‑2.0).
 

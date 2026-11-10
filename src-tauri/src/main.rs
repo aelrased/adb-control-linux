@@ -699,6 +699,42 @@ fn extract_apk_groups(
     Ok(groups.into_iter().collect())
 }
 
+fn install_error_hint(message: &str) -> String {
+    let lower = message.to_lowercase();
+    if lower.contains("install_failed_update_incompatible")
+        || lower.contains("signatures do not match")
+        || lower.contains("signature")
+    {
+        return "توقيع النسخة المثبتة مختلف (نسخة معدّلة) — احذف التطبيق القديم ثم أعد التثبيت".into();
+    }
+    if lower.contains("install_failed_version_downgrade") {
+        return "النسخة المثبتة أحدث من الملف — احذف التطبيق أو استخدم ملفاً أحدث".into();
+    }
+    if lower.contains("install_failed_user_restricted") {
+        return "الجهاز يمنع التثبيت عبر USB — فعّل «Install via USB» في خيارات المطور".into();
+    }
+    if lower.contains("install_failed_insufficient_storage") {
+        return "لا توجد مساحة كافية على الجهاز".into();
+    }
+    if lower.contains("install_failed_invalid_apk")
+        || lower.contains("install_parse_failed")
+    {
+        return "ملف APK غير صالح (تالف أو ناقص)".into();
+    }
+    if lower.contains("install_failed_already_exists")
+        || lower.contains("install_failed_already") 
+    {
+        return "التطبيق مثبّت بالفعل — فعّل «إعادة التثبيت»".into();
+    }
+    if lower.contains("install_failed_blocked") || lower.contains("install_failed_aborted") {
+        return "تم رفض التثبيت من النظام (Play Protect أو سياسة الجهاز)".into();
+    }
+    if lower.contains("no such file") {
+        return "ملف APK غير موجود".into();
+    }
+    message.trim().to_string()
+}
+
 fn install_apks_blocking(
     serial: &str,
     paths: Vec<String>,
@@ -739,53 +775,24 @@ fn install_apks_blocking(
 
     let mut ok = 0usize;
     let mut failures: Vec<String> = Vec::new();
-    for (group_index, (group_name, files)) in groups.iter().enumerate() {
-        let mut remote: Vec<String> = Vec::new();
-        let mut upload_failed = false;
-        for (index, file) in files.iter().enumerate() {
-            let dst = format!("/data/local/tmp/adbcontrol-install-{group_index}-{index}.apk");
-            match run_adb(&[
-                s("-s"),
-                serial.to_string(),
-                s("push"),
-                file.clone(),
-                dst.clone(),
-            ]) {
-                Ok(_) => remote.push(dst),
-                Err(e) => {
-                    failures.push(format!("{group_name}: {e}"));
-                    upload_failed = true;
-                    break;
-                }
-            }
-        }
-        if upload_failed || remote.is_empty() {
-            continue;
-        }
-
+    for (group_name, files) in groups.iter() {
+        // Install straight from the host: `adb install <device path>` does not
+        // work because adb always reads the APK from the host machine.
         let mut args = vec![
             s("-s"),
             serial.to_string(),
-            if remote.len() == 1 { s("install") } else { s("install-multiple") },
+            if files.len() == 1 { s("install") } else { s("install-multiple") },
         ];
         if reinstall {
             args.push(s("-r"));
         }
-        args.extend(remote.iter().cloned());
+        args.extend(files.iter().cloned());
 
         match run_adb(&args) {
-            Ok(out) if !out.contains("Failure") => ok += 1,
-            Ok(out) => failures.push(format!("{group_name}: {}", out.trim())),
-            Err(e) => failures.push(format!("{group_name}: {e}")),
+            Ok(out) if out.contains("Success") => ok += 1,
+            Ok(out) => failures.push(format!("{group_name}: {}", install_error_hint(out.trim()))),
+            Err(e) => failures.push(format!("{group_name}: {}", install_error_hint(&e))),
         }
-        let _ = run_adb(&[
-            s("-s"),
-            serial.to_string(),
-            s("shell"),
-            s("rm"),
-            s("-f"),
-            remote.join(" "),
-        ]);
     }
 
     for dir in &temp_dirs {

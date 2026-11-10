@@ -1405,6 +1405,109 @@ async fn debloat_apply(
     .map_err(|e| e.to_string())?
 }
 
+fn device_ip(serial: &str) -> Option<String> {
+    if let Ok(routes) = run_adb(&[
+        s("-s"),
+        serial.to_string(),
+        s("shell"),
+        s("ip"),
+        s("route"),
+    ]) {
+        for line in routes.lines() {
+            if !(line.contains(" wlan0 ") || line.contains(" eth0 ")) {
+                continue;
+            }
+            if let Some(pos) = line.find(" src ") {
+                if let Some(ip) = line[pos + 5..].split_whitespace().next() {
+                    if ip.starts_with("192.")
+                        || ip.starts_with("10.")
+                        || ip.starts_with("172.")
+                    {
+                        return Some(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    for iface in ["wlan0", "eth0"] {
+        if let Ok(out) = run_adb(&[
+            s("-s"),
+            serial.to_string(),
+            s("shell"),
+            s("ip"),
+            s("addr"),
+            s("show"),
+            s(iface),
+        ]) {
+            for line in out.lines() {
+                if let Some(pos) = line.find("inet ") {
+                    if let Some(ip) = line[pos + 5..].split('/').next() {
+                        let ip = ip.trim();
+                        if !ip.is_empty() {
+                            return Some(ip.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+async fn enable_wireless(serial: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if serial.contains(':') {
+            return Ok(serial);
+        }
+        let ip = device_ip(&serial).ok_or_else(|| {
+            "لم أجد عنوان IP للجهاز. تأكد من اتصاله بالواي فاي أو Ethernet".to_string()
+        })?;
+        let out = run_adb(&[
+            s("-s"),
+            serial.clone(),
+            s("tcpip"),
+            s("5555"),
+        ])?;
+        if out.to_lowercase().contains("error") {
+            return Err(out.trim().to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1800));
+        let endpoint = format!("{ip}:5555");
+        let connected = run_adb(&[s("connect"), endpoint.clone()])?;
+        if connected.to_lowercase().contains("failed")
+            || connected.to_lowercase().contains("cannot")
+        {
+            return Err(connected.trim().to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        run_adb(&[
+            s("-s"),
+            endpoint.clone(),
+            s("shell"),
+            s("echo"),
+            s("ok"),
+        ])?;
+        Ok(endpoint)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn disable_wireless(serial: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !serial.contains(':') {
+            return Ok("الجهاز متصل عبر USB بالفعل".into());
+        }
+        let _ = run_adb(&[s("-s"), serial.clone(), s("usb")]);
+        let _ = run_adb(&[s("disconnect"), serial]);
+        Ok("تم إيقاف ADB اللاسلكي (عاد إلى USB)".into())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn run_command(serial: String, command: String) -> Result<String, String> {
     if command.trim().is_empty() {
@@ -1496,6 +1599,8 @@ fn main() {
             debloat_match,
             debloat_packages,
             debloat_apply,
+            enable_wireless,
+            disable_wireless,
             disconnect_device,
             device_info,
             list_apps,

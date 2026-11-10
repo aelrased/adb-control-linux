@@ -152,6 +152,7 @@ async function refreshDevices() {
   select.value = state.serial;
   $("footerDevice").textContent = state.serial;
   await onDeviceChanged();
+  updateWirelessLabel();
 }
 
 async function onDeviceChanged() {
@@ -165,6 +166,7 @@ async function onDeviceChanged() {
   if (state.apps.length && (!bridge || bridge.icons === 0)) {
     toast("لا توجد أيقونات محفوظة — اضغط «أيقونات التطبيقات» لقراءتها من الجهاز");
   }
+  updateWirelessLabel();
 }
 
 function renderDeviceInfo(info) {
@@ -584,11 +586,50 @@ async function applyCyt(enable) {
 
 function wireClean() {
   $("btnClean")?.addEventListener("click", () => openClean());
+  $("btnWireless")?.addEventListener("click", () => toggleWireless());
   $("cytClose")?.addEventListener("click", () => cleanModal.classList.add("hidden"));
   $("cytFetch")?.addEventListener("click", () => fetchCyt());
   $("cytProfile")?.addEventListener("change", () => updateCytCount());
   $("cytDisable")?.addEventListener("click", () => applyCyt(false));
   $("cytEnable")?.addEventListener("click", () => applyCyt(true));
+}
+
+
+async function toggleWireless() {
+  if (!state.serial) return toast("اختر جهازاً أولاً", true);
+  const isNetwork = state.serial.includes(":");
+  setBusy(true, isNetwork ? "إيقاف ADB اللاسلكي…" : "تفعيل ADB اللاسلكي…");
+  if (isNetwork) {
+    const res = await safe(() => invoke("disable_wireless", { serial: state.serial }), "ADB اللاسلكي");
+    setBusy(false);
+    if (res) {
+      log(res, "ok");
+      toast(res);
+      await refreshDevices();
+    }
+  } else {
+    const endpoint = await safe(() => invoke("enable_wireless", { serial: state.serial }), "ADB اللاسلكي");
+    setBusy(false);
+    if (endpoint) {
+      log(`ADB لاسلكي: ${endpoint}`, "ok");
+      toast(`تم التفعيل: ${endpoint}`);
+      await refreshDevices();
+      if (state.devices.some((d) => d.serial === endpoint)) {
+        state.serial = endpoint;
+        $("deviceSelect").value = endpoint;
+        await onDeviceChanged();
+      }
+    }
+  }
+  updateWirelessLabel();
+}
+
+function updateWirelessLabel() {
+  const label = $("wirelessLabel");
+  if (!label) return;
+  label.textContent = state.serial && state.serial.includes(":")
+    ? "إيقاف ADB اللاسلكي"
+    : "تفعيل ADB لاسلكي";
 }
 
 /* ---------------- Wiring ---------------- */

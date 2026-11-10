@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ADB Control Linux</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img class="brand-mark" src="icon.png" alt="ADB AppControl" />
+      <div class="brand-text">
+        <strong>ADB Control</strong>
+        <span id="brandSub">Linux · Open Source</span>
+      </div>
+    </div>
+
+    <div class="device-picker">
+      <label for="deviceSelect">الجهاز</label>
+      <select id="deviceSelect" title="اختر الجهاز المتصل">
+        <option value="">— لا يوجد جهاز —</option>
+      </select>
+      <button id="refreshDevices" class="icon-btn" title="تحديث الأجهزة">⟳</button>
+    </div>
+
+    <div class="connect-box">
+      <input id="connectAddr" type="text" placeholder="192.168.1.50:5555" spellcheck="false" />
+      <button id="connectBtn" class="btn">اتصال Wi‑Fi</button>
+    </div>
+
+    <div class="top-status">
+      <span id="adbStatus" class="chip">adb: …</span>
+    </div>
+  </header>
+
+  <div class="shell">
+    <aside class="sidebar">
+      <section class="card">
+        <div class="card-title">معلومات الجهاز</div>
+        <div id="deviceInfo" class="device-info">
+          <div class="empty-hint">لم يتم اختيار جهاز</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">أدوات سريعة</div>
+        <div class="quick-grid">
+          <button id="btnScreenshot" class="quick">📸<span>لقطة شاشة</span></button>
+          <button id="btnLogcat" class="quick">📜<span>Logcat</span></button>
+          <button id="btnRefreshApps" class="quick">🔄<span>تحديث القائمة</span></button>
+          <button id="btnIcons" class="quick">🎨<span>أيقونات التطبيقات</span></button>
+          <button id="btnAdb" class="quick">⚙️<span>تحديد adb</span></button>
+          <button id="btnReboot" class="quick">⏻<span>إعادة تشغيل</span></button>
+        </div>
+      </section>
+
+      <section class="card grow">
+        <div class="card-title">طرفية ADB</div>
+        <div class="terminal">
+          <div id="console" class="console"></div>
+          <div class="terminal-input">
+            <input id="cmdInput" type="text" placeholder="shell pm list packages" spellcheck="false" />
+            <button id="cmdRun" class="btn small">تنفيذ</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <main class="content">
+      <div class="toolbar">
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-filter="all">الكل <b id="countAll">0</b></button>
+          <button class="tab" data-filter="user">مستخدم <b id="countUser">0</b></button>
+          <button class="tab" data-filter="system">نظام <b id="countSystem">0</b></button>
+          <button class="tab" data-filter="disabled">معطّل <b id="countDisabled">0</b></button>
+        </div>
+        <div class="search-box">
+          <span>🔎</span>
+          <input id="searchInput" type="search" placeholder="ابحث بالاسم أو اسم الحزمة…" />
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="apps">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="selectAll" title="تحديد الكل" /></th>
+              <th>التطبيق</th>
+              <th class="col-ver">الإصدار</th>
+              <th class="col-type">النوع</th>
+              <th class="col-state">الحالة</th>
+            </tr>
+          </thead>
+          <tbody id="appsBody">
+            <tr><td colspan="5" class="empty-row">اختر جهازاً ثم اضغط «تحديث القائمة»</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="actionbar">
+        <div class="selection-info">
+          <span id="selCount">0</span> محدد
+        </div>
+        <div class="actions">
+          <button id="btnDisable" class="btn warn">تعطيل</button>
+          <button id="btnEnable" class="btn ok">تفعيل</button>
+          <button id="btnClear" class="btn">مسح البيانات</button>
+          <button id="btnUninstall" class="btn danger">حذف</button>
+          <button id="btnSaveApk" class="btn">حفظ APK</button>
+          <button id="btnInstallApk" class="btn primary">تثبيت APK</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <footer class="statusbar">
+    <span id="statusText">جاهز</span>
+    <span id="progress" class="progress hidden"><i></i></span>
+    <span class="spacer"></span>
+    <span id="footerDevice" class="muted">لا جهاز</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

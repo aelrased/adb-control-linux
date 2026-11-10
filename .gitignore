@@ -1,0 +1,9 @@
+/target
+/src-tauri/target
+/src-tauri/gen
+node_modules
+bridge/build
+
+*.log
+.DS_Store
+bridge/keystore

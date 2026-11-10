@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ADB Control Windows",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ADB Control Windows",
+        "width": 1320,
+        "height": 840,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "center": true,
+        "theme": "Dark",
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "resources": {
+      "platform-tools/adb.exe": "platform-tools/adb.exe",
+      "platform-tools/AdbWinApi.dll": "platform-tools/AdbWinApi.dll",
+      "platform-tools/AdbWinUsbApi.dll": "platform-tools/AdbWinUsbApi.dll",
+      "platform-tools/NOTICE.txt": "platform-tools/NOTICE.txt"
+    }
+  }
+}

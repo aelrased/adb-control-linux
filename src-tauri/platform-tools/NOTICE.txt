@@ -1,0 +1,19 @@
+Android SDK Platform-Tools (Windows)
+====================================
+
+Files bundled here:
+  adb.exe            SHA-256 b4a6b455702684652cccf7b46258b29e653538904359a58fd4931cf3ef286b3f
+  AdbWinApi.dll      SHA-256 c1d653030b4bde65d3e07e4d0b0979e17be56df1436cdd15528630f27808050d
+  AdbWinUsbApi.dll   SHA-256 0710e894d9b40f71a670c13c694079d564c92c1279da382cfe4850983aaebe1b
+
+Source:
+  https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+  (Android SDK Platform-Tools, Google LLC)
+
+License:
+  Apache License 2.0 — https://www.apache.org/licenses/LICENSE-2.0
+  Android is a trademark of Google LLC. This project is not affiliated with Google.
+
+These files are redistributed unmodified under the terms of the Apache License 2.0.
+Their purpose is to let ADB AppControl work out of the box on Windows without a
+separate Android SDK installation.

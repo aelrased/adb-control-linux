@@ -17,19 +17,20 @@
     </div>
 
     <div class="device-picker">
-      <label for="deviceSelect">الجهاز</label>
-      <select id="deviceSelect" title="اختر الجهاز المتصل">
+      <label for="deviceSelect" data-i18n="device">الجهاز</label>
+      <select id="deviceSelect" data-i18n-title="deviceSelectTitle" title="اختر الجهاز المتصل">
         <option value="">— لا يوجد جهاز —</option>
       </select>
-      <button id="refreshDevices" class="icon-btn" title="تحديث الأجهزة">⟳</button>
+      <button id="refreshDevices" class="icon-btn" data-i18n-title="refreshDevices" title="تحديث الأجهزة">⟳</button>
     </div>
 
     <div class="connect-box">
       <input id="connectAddr" type="text" placeholder="192.168.1.50:5555" spellcheck="false" />
-      <button id="connectBtn" class="btn">اتصال Wi‑Fi</button>
+      <button id="connectBtn" class="btn" data-i18n="connectWifi">اتصال Wi‑Fi</button>
     </div>
 
     <div class="top-status">
+      <button id="langBtn" class="chip lang-btn" title="اللغة / Language">English</button>
       <span id="adbStatus" class="chip">adb: …</span>
     </div>
   </header>
@@ -37,33 +38,48 @@
   <div class="shell">
     <aside class="sidebar">
       <section class="card">
-        <div class="card-title">معلومات الجهاز</div>
+        <div class="card-title" data-i18n="deviceInfo">معلومات الجهاز</div>
         <div id="deviceInfo" class="device-info">
-          <div class="empty-hint">لم يتم اختيار جهاز</div>
+          <div class="empty-hint" data-i18n="noDevice">لم يتم اختيار جهاز</div>
         </div>
       </section>
 
       <section class="card">
-        <div class="card-title">أدوات سريعة</div>
+        <div class="card-title" data-i18n="ramTitle">الذاكرة</div>
+        <div class="ram-head">
+          <span>RAM</span>
+          <span id="ramText" class="ram-value" dir="ltr">— / — MB</span>
+        </div>
+        <div class="ram-bar"><div id="ramFill" class="ram-fill" style="width: 0%"></div></div>
+        <button id="btnProcesses" class="btn ram-btn" data-i18n="processManager" disabled>مدير العمليات</button>
+      </section>
+
+      <section class="card">
+        <div class="card-title" data-i18n="quickTools">أدوات سريعة</div>
         <div class="quick-grid">
-          <button id="btnScreenshot" class="quick">📸<span>لقطة شاشة</span></button>
+          <button id="btnScreenshot" class="quick">📸<span data-i18n="screenshot">لقطة شاشة</span></button>
           <button id="btnLogcat" class="quick">📜<span>Logcat</span></button>
-          <button id="btnRefreshApps" class="quick">🔄<span>تحديث القائمة</span></button>
-          <button id="btnIcons" class="quick">🎨<span>أيقونات التطبيقات</span></button>
-          <button id="btnAdb" class="quick">⚙️<span>تحديد adb</span></button>
+          <button id="btnRefreshApps" class="quick">🔄<span data-i18n="refreshList">تحديث القائمة</span></button>
+          <button id="btnIcons" class="quick">🎨<span data-i18n="appIcons">أيقونات التطبيقات</span></button>
+          <button id="btnAdb" class="quick">⚙️<span data-i18n="chooseAdb">تحديد adb</span></button>
           <button id="btnClean" class="quick">🧹<span>CleanYourTV</span></button>
           <button id="btnWireless" class="quick">📶<span id="wirelessLabel">تفعيل ADB لاسلكي</span></button>
-          <button id="btnReboot" class="quick">⏻<span>إعادة تشغيل</span></button>
+          <button id="btnPresetSave" class="quick" data-i18n-title="btnPresetSaveTitle" title="حفظ التطبيقات المحددة في ملف Preset" disabled>💾<span data-i18n="btnPresetSave">حفظ Preset</span></button>
+          <button id="btnPresetLoad" class="quick" data-i18n-title="btnPresetLoadTitle" title="تحميل Preset وتحديد تطبيقاته" disabled>📂<span data-i18n="btnPresetLoad">تحميل Preset</span></button>
+          <button id="btnReboot" class="quick">⏻<span data-i18n="reboot">إعادة تشغيل</span></button>
         </div>
       </section>
 
       <section class="card grow">
-        <div class="card-title">طرفية ADB</div>
+        <div class="card-title console-title">
+          <span data-i18n="adbTerminal">طرفية ADB</span>
+          <button id="btnConsole" class="icon-btn mini" data-i18n-title="consoleOpen" title="فتح Console">⤢</button>
+        </div>
         <div class="terminal">
           <div id="console" class="console"></div>
           <div class="terminal-input">
             <input id="cmdInput" type="text" placeholder="shell pm list packages" spellcheck="false" />
-            <button id="cmdRun" class="btn small">تنفيذ</button>
+            <button id="cmdRun" class="btn small" data-i18n="run">تنفيذ</button>
           </div>
         </div>
       </section>
@@ -72,14 +88,16 @@
     <main class="content">
       <div class="toolbar">
         <div class="tabs" role="tablist">
-          <button class="tab active" data-filter="all">الكل <b id="countAll">0</b></button>
-          <button class="tab" data-filter="user">مستخدم <b id="countUser">0</b></button>
-          <button class="tab" data-filter="system">نظام <b id="countSystem">0</b></button>
-          <button class="tab" data-filter="disabled">معطّل <b id="countDisabled">0</b></button>
+          <button class="tab active" data-filter="all"><span data-i18n="all">الكل</span> <b id="countAll">0</b></button>
+          <button class="tab" data-filter="enabled"><span data-i18n="enabled">المفعّلة</span> <b id="countEnabled">0</b></button>
+          <button class="tab" data-filter="user"><span data-i18n="user">مستخدم</span> <b id="countUser">0</b></button>
+          <button class="tab" data-filter="system"><span data-i18n="system">نظام</span> <b id="countSystem">0</b></button>
+          <button class="tab" data-filter="disabled"><span data-i18n="disabled">معطّل</span> <b id="countDisabled">0</b></button>
+          <button class="tab" data-filter="removed" data-i18n-title="removedTabTitle" title="تطبيقات محذوفة للمستخدم 0 ويمكن استعادتها"><span data-i18n="removed">محذوفة</span> <b id="countRemoved">0</b></button>
         </div>
         <div class="search-box">
           <span>🔎</span>
-          <input id="searchInput" type="search" placeholder="ابحث بالاسم أو اسم الحزمة…" />
+          <input id="searchInput" type="search" data-i18n-placeholder="search" placeholder="ابحث بالاسم أو اسم الحزمة…" />
         </div>
       </div>
 
@@ -87,62 +105,167 @@
         <table class="apps">
           <thead>
             <tr>
-              <th class="col-check"><input type="checkbox" id="selectAll" title="تحديد الكل" /></th>
-              <th>التطبيق</th>
-              <th class="col-ver">الإصدار</th>
-              <th class="col-type">النوع</th>
-              <th class="col-state">الحالة</th>
+              <th class="col-check"><input type="checkbox" id="selectAll" data-i18n-title="selectAll" title="تحديد الكل" /></th>
+              <th data-i18n="colApp">التطبيق</th>
+              <th class="col-ver" data-i18n="colVersion">الإصدار</th>
+              <th class="col-type" data-i18n="colType">النوع</th>
+              <th class="col-state" data-i18n="colState">الحالة</th>
             </tr>
           </thead>
           <tbody id="appsBody">
-            <tr><td colspan="5" class="empty-row">اختر جهازاً ثم اضغط «تحديث القائمة»</td></tr>
+            <tr><td colspan="5" class="empty-row" data-i18n="initHint">اختر جهازاً ثم اضغط «تحديث القائمة»</td></tr>
           </tbody>
         </table>
       </div>
 
       <div class="actionbar">
         <div class="selection-info">
-          <span id="selCount">0</span> محدد
+          <span id="selCount">0</span> <span data-i18n="selected">محدد</span>
         </div>
         <div class="actions">
-          <button id="btnDisable" class="btn warn">تعطيل</button>
-          <button id="btnEnable" class="btn ok">تفعيل</button>
-          <button id="btnClearCache" class="btn">مسح الكاش</button>
-          <button id="btnClear" class="btn">مسح البيانات</button>
-          <button id="btnUninstall" class="btn danger">حذف</button>
-          <button id="btnSaveApk" class="btn">حفظ APK</button>
-          <button id="btnInstallApk" class="btn primary">تثبيت APK</button>
+          <button id="btnDisable" class="btn warn" data-i18n="btnDisable">تعطيل</button>
+          <button id="btnEnable" class="btn ok" data-i18n="btnEnable">تفعيل</button>
+          <button id="btnClearCache" class="btn" data-i18n="btnClearCache">مسح الكاش</button>
+          <button id="btnClear" class="btn" data-i18n="btnClearData">مسح البيانات</button>
+          <button id="btnUninstall" class="btn danger" data-i18n="btnUninstall">حذف</button>
+          <button id="btnRestore" class="btn ok" data-i18n="btnRestore" data-i18n-title="btnRestoreTitle" title="pm install-existing — استعادة تطبيق محذوف للمستخدم 0">استعادة</button>
+          <button id="btnUninstallDeep" class="btn danger" data-i18n="btnUninstallDeep" data-i18n-title="btnUninstallDeepTitle" title="إزالة تحديثات النظام ثم الحذف للمستخدم 0 — نسخة /system تتطلب روت">حذف نهائي</button>
+          <button id="btnSaveApk" class="btn" data-i18n="btnSaveApk">حفظ APK</button>
+          <button id="btnBackupZip" class="btn" data-i18n="btnBackupZip" data-i18n-title="btnBackupZipTitle" title="نسخة احتياطية ZIP لملفات APK الأصلية للتطبيقات المحددة" disabled>نسخة ZIP</button>
+          <button id="btnPermissions" class="btn" data-i18n="btnPermissions" data-i18n-title="btnPermissionsTitle" title="عرض ومنح وسحب صلاحيات تطبيق واحد" disabled>الصلاحيات</button>
+          <button id="btnInstallApk" class="btn primary" data-i18n="btnInstallApk">تثبيت APK</button>
         </div>
       </div>
     </main>
   </div>
 
   <footer class="statusbar">
-    <span id="statusText">جاهز</span>
+    <span id="statusText" data-i18n="ready">جاهز</span>
     <span id="progress" class="progress hidden"><i></i></span>
     <span class="spacer"></span>
     <span id="footerDevice" class="muted">لا جهاز</span>
   </footer>
 
 
+  <div id="consoleModal" class="modal hidden">
+    <div class="modal-card console-card">
+      <div class="proc-head">
+        <h3 data-i18n="consoleTitle">Console — ADB Shell</h3>
+        <div class="proc-actions">
+          <button id="consoleCopy" class="btn small" data-i18n="consoleCopy">نسخ</button>
+          <button id="consoleClear" class="btn small" data-i18n="consoleClear">مسح</button>
+          <button id="consoleClose" class="btn small" data-i18n="close">إغلاق</button>
+        </div>
+      </div>
+      <p id="consoleDevice" class="muted"></p>
+      <div id="consoleOut" class="console console-large" dir="ltr"></div>
+      <div id="consoleQuick" class="console-quick"></div>
+      <div class="terminal-input">
+        <input id="consoleInput" type="text" placeholder="pm list packages -3" spellcheck="false" dir="ltr" />
+        <button id="consoleRun" class="btn primary small" data-i18n="run">تنفيذ</button>
+      </div>
+      <p class="muted small" data-i18n="consoleHint">Enter للتنفيذ · ↑/↓ لسجل الأوامر · Ctrl+L للمسح</p>
+    </div>
+  </div>
+
+  <div id="procModal" class="modal hidden">
+    <div class="modal-card proc-card">
+      <div class="proc-head">
+        <h3 data-i18n="processesTitle">مدير العمليات</h3>
+        <div class="proc-actions">
+          <button id="procRefresh" class="btn small" data-i18n="procRefresh">تحديث</button>
+          <button id="procClose" class="btn small" data-i18n="close">إغلاق</button>
+        </div>
+      </div>
+      <p id="procSummary" class="muted"></p>
+      <div class="proc-table-wrap">
+        <table class="proc-table">
+          <thead>
+            <tr>
+              <th>PID</th>
+              <th data-i18n="procName">العملية</th>
+              <th class="proc-ram-col" data-i18n="procRam">الذاكرة</th>
+              <th class="proc-act-col" data-i18n="procAction">إجراء</th>
+            </tr>
+          </thead>
+          <tbody id="procBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="permModal" class="modal hidden">
+    <div class="modal-card perm-card">
+      <div class="proc-head">
+        <div class="perm-head-text">
+          <h3 data-i18n="permTitle">إدارة الصلاحيات</h3>
+          <p id="permApp" class="muted small"></p>
+        </div>
+        <div class="proc-actions">
+          <button id="permRefresh" class="btn small" data-i18n="permRefresh">تحديث</button>
+          <button id="permClose" class="btn small" data-i18n="close">إغلاق</button>
+        </div>
+      </div>
+      <p class="muted small perm-help" data-i18n="permHelp">منح أو سحب صلاحيات التشغيل لهذا التطبيق. الصلاحيات المثبّتة وقت التثبيت للقراءة فقط.</p>
+      <div class="perm-toolbar">
+        <div class="search-box perm-search">
+          <span>🔎</span>
+          <input id="permSearch" type="search" data-i18n-placeholder="permSearch" placeholder="ابحث عن صلاحية…" />
+        </div>
+        <label class="perm-filter">
+          <input type="checkbox" id="permOnlyGranted" />
+          <span data-i18n="permOnlyGranted">الممنوحة فقط</span>
+        </label>
+      </div>
+      <div class="perm-toolbar perm-actions-row">
+        <p id="permSummary" class="muted small"></p>
+        <span class="spacer"></span>
+        <button id="permGrantAll" class="btn small ok" data-i18n="permGrantAll">منح الكل</button>
+        <button id="permRevokeAll" class="btn small warn" data-i18n="permRevokeAll">سحب الكل</button>
+      </div>
+      <div id="permList" class="perm-list"></div>
+    </div>
+  </div>
+
+  <div id="presetModal" class="modal hidden">
+    <div class="modal-card preset-card">
+      <h3 data-i18n="presetSaveTitle">حفظ Preset</h3>
+      <p id="presetCount" class="muted small"></p>
+      <label class="preset-field">
+        <span data-i18n="presetName">اسم الـ Preset</span>
+        <input id="presetName" type="text" spellcheck="false" />
+      </label>
+      <label class="preset-field">
+        <span data-i18n="presetComment">الوصف (اختياري)</span>
+        <input id="presetComment" type="text" spellcheck="false" />
+      </label>
+      <div class="clean-actions">
+        <button id="presetSave" class="btn primary" data-i18n="presetSave">حفظ</button>
+        <button id="presetCancel" class="btn" data-i18n="close">إغلاق</button>
+      </div>
+      <p class="muted small" data-i18n="presetHint">ملف نصي بسيط بأسماء الحزم، يمكن مشاركته واستخدامه على أجهزة أخرى.</p>
+    </div>
+  </div>
+
   <div id="cleanModal" class="modal hidden">
     <div class="modal-card">
-      <h3>CleanYourTV — تنظيف التلفزيون</h3>
+      <h3 data-i18n="cleanTitle">CleanYourTV — تنظيف التلفزيون</h3>
       <p id="cleanDevice" class="muted"></p>
       <div class="clean-row">
-        <button id="cytFetch" class="btn">تحديث القوائم (اختياري)</button>
+        <button id="cytFetch" class="btn" data-i18n="cytFetch">تحديث القوائم (اختياري)</button>
         <span id="cytStatus" class="muted"></span>
       </div>
       <select id="cytProfile"></select>
       <p id="cytCount" class="muted"></p>
       <div class="clean-actions">
-        <button id="cytDisable" class="btn warn">تعطيل الحزم</button>
-        <button id="cytEnable" class="btn ok">استعادة الحزم</button>
-        <button id="cytClose" class="btn">إغلاق</button>
+        <button id="cytDisable" class="btn warn" data-i18n="cytDisable">تعطيل الحزم</button>
+        <button id="cytEnable" class="btn ok" data-i18n="cytEnable">استعادة الحزم</button>
+        <button id="cytClose" class="btn" data-i18n="close">إغلاق</button>
       </div>
-      <p class="muted small">تعطيل فقط عبر pm disable-user — لا حذف. استخدم «استعادة الحزم» للتراجع.</p>
+      <p class="muted small" data-i18n="cleanNote">تعطيل فقط عبر pm disable-user — لا حذف. استخدم «استعادة الحزم» للتراجع.</p>
     </div>
   </div>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -1,0 +1,17 @@
+UDADB-NG package classification list
+====================================
+
+File: uad_lists.json (bundled snapshot, embedded into adb-appcontrol)
+
+Source:
+  https://github.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation
+  (Universal Android Debloater NG)
+
+License:
+  GPL-3.0-or-later
+
+The list classifies Android packages by removal safety
+(Recommended / Advanced / Expert / Unsafe). It is used only to show a warning
+label; removal actions are executed through adb exactly as before.
+
+This project is not affiliated with the UAD-NG authors.

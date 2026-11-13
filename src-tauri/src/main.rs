@@ -18,6 +18,32 @@ static RESOURCE_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 const BRIDGE_APK: &[u8] = include_bytes!("../assets/bridge.apk");
 const BRIDGE_PKG: &str = "com.adbappcontrol.bridge";
 
+/// Universal Android Debloater NG list (bundled snapshot, same as the Android app).
+const UAD_JSON: &str = include_str!("../assets/uad_lists.json");
+
+#[derive(serde::Deserialize)]
+struct UadEntry {
+    #[serde(default)]
+    removal: String,
+}
+
+static UAD_MAP: OnceLock<std::collections::HashMap<String, UadEntry>> = OnceLock::new();
+
+fn uad_map() -> &'static std::collections::HashMap<String, UadEntry> {
+    UAD_MAP.get_or_init(|| {
+        serde_json::from_str::<std::collections::HashMap<String, UadEntry>>(UAD_JSON)
+            .unwrap_or_default()
+    })
+}
+
+/// UDADB-NG safety class: Recommended / Advanced / Expert / Unsafe.
+fn uad_removal(package: &str) -> Option<String> {
+    uad_map()
+        .get(package)
+        .map(|e| e.removal.trim().to_string())
+        .filter(|r| !r.is_empty())
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct Config {
     adb_path: Option<String>,
@@ -203,6 +229,36 @@ fn timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// UTC civil date from a Unix day count (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (y + if m <= 2 { 1 } else { 0 }, m, d)
+}
+
+/// File-friendly UTC stamp, e.g. `20261112-220815`.
+fn utc_stamp() -> String {
+    let secs = timestamp() as i64;
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    let rem = secs.rem_euclid(86_400);
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        y,
+        m,
+        d,
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}
+
 fn cache_dir() -> std::path::PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| home_dir().join(".cache"))
@@ -254,6 +310,9 @@ struct AppInfo {
     apk_path: Option<String>,
     system: bool,
     disabled: bool,
+    #[serde(default)]
+    removed: bool,
+    uad: Option<String>,
 }
 
 fn pretty_label(package: &str) -> String {
@@ -415,6 +474,148 @@ async fn device_info(serial: String) -> Result<serde_json::Value, String> {
     Ok(serde_json::Value::Object(map))
 }
 
+#[derive(Serialize)]
+struct ProcessInfo {
+    pid: u32,
+    name: String,
+    rss_mb: f64,
+}
+
+/// RAM usage from /proc/meminfo, in decimal MB (same numbers as ADB AppControl).
+#[tauri::command]
+async fn device_memory(serial: String) -> Result<serde_json::Value, String> {
+    let raw = adb(vec![
+        s("-s"),
+        serial,
+        s("shell"),
+        s("cat"),
+        s("/proc/meminfo"),
+    ])
+    .await?;
+    let mut total_kb: u64 = 0;
+    let mut available_kb: u64 = 0;
+    let mut free_kb: u64 = 0;
+    let mut cached_kb: u64 = 0;
+    for line in raw.lines() {
+        let mut parts = line.split_whitespace();
+        let key = parts.next().unwrap_or("");
+        let value: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        match key {
+            "MemTotal:" => total_kb = value,
+            "MemAvailable:" => available_kb = value,
+            "MemFree:" => free_kb = value,
+            "Cached:" => cached_kb = value,
+            _ => {}
+        }
+    }
+    if total_kb == 0 {
+        return Err("تعذّر قراءة الذاكرة من الجهاز".into());
+    }
+    // Older kernels lack MemAvailable.
+    let available = if available_kb > 0 {
+        available_kb
+    } else {
+        free_kb + cached_kb
+    };
+    let used_kb = total_kb.saturating_sub(available);
+    Ok(serde_json::json!({
+        "total_mb": total_kb / 1000,
+        "used_mb": used_kb / 1000,
+        "free_mb": available / 1000,
+        "percent": if total_kb > 0 { ((used_kb as f64 / total_kb as f64) * 1000.0).round() / 10.0 } else { 0.0 },
+    }))
+}
+
+/// Running processes with resident memory, filled by `ps` (no root needed).
+#[tauri::command]
+async fn list_processes(serial: String) -> Result<Vec<ProcessInfo>, String> {
+    let raw = match adb(vec![
+        s("-s"),
+        serial.clone(),
+        s("shell"),
+        s("ps"),
+        s("-A"),
+        s("-o"),
+        s("PID,RSS,NAME"),
+    ])
+    .await
+    {
+        Ok(out) => out,
+        Err(_) => {
+            adb(vec![
+                s("-s"),
+                serial,
+                s("shell"),
+                s("ps"),
+                s("-A"),
+            ])
+            .await?
+        }
+    };
+
+    let mut procs: Vec<ProcessInfo> = Vec::new();
+    for line in raw.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let parsed = if let Ok(pid) = parts[0].parse::<u32>() {
+            // `ps -o PID,RSS,NAME`
+            parts[1]
+                .parse::<u64>()
+                .ok()
+                .map(|rss| (pid, rss, parts[2..].join(" ")))
+        } else if parts.len() >= 8 {
+            // Fallback: `ps -A` → USER PID PPID VSZ RSS ... NAME
+            parts[1]
+                .parse::<u32>()
+                .ok()
+                .zip(parts[4].parse::<u64>().ok())
+                .map(|(pid, rss)| (pid, rss, parts[parts.len() - 1].to_string()))
+        } else {
+            None
+        };
+        let Some((pid, rss_kb, name)) = parsed else {
+            continue;
+        };
+        if rss_kb == 0 || name.starts_with('[') || name.is_empty() || name == "NAME" {
+            continue;
+        }
+        procs.push(ProcessInfo {
+            pid,
+            name,
+            rss_mb: (rss_kb as f64 / 1024.0 * 10.0).round() / 10.0,
+        });
+    }
+    procs.sort_by(|a, b| b.rss_mb.partial_cmp(&a.rss_mb).unwrap_or(std::cmp::Ordering::Equal));
+    procs.truncate(300);
+    Ok(procs)
+}
+
+/// Force-stop an app process (`am force-stop`). System daemons need root and
+/// are rejected by the package-name validation below.
+#[tauri::command]
+async fn kill_process(serial: String, name: String) -> Result<String, String> {
+    let pkg = name.split(':').next().unwrap_or(&name).to_string();
+    if !valid_package(&pkg) {
+        return Err("هذا الإجراء متاح لتطبيقات أندرويد فقط (اسم حزمة صالح)".into());
+    }
+    let out = adb(vec![
+        s("-s"),
+        serial,
+        s("shell"),
+        s("am"),
+        s("force-stop"),
+        s(&pkg),
+    ])
+    .await?;
+    let text = out.trim();
+    if text.contains("Error") || text.contains("Exception") {
+        return Err(text.to_string());
+    }
+    Ok(format!("تم إيقاف {pkg}"))
+}
+
 #[tauri::command]
 async fn list_apps(serial: String) -> Result<Vec<AppInfo>, String> {
     let base = vec![s("-s"), serial.clone()];
@@ -483,6 +684,8 @@ async fn list_apps(serial: String) -> Result<Vec<AppInfo>, String> {
             apk_path: Some(path),
             system,
             disabled: disabled.contains(&pkg),
+            removed: false,
+            uad: uad_removal(&pkg),
             package: pkg,
         });
     }
@@ -518,10 +721,498 @@ async fn list_apps(serial: String) -> Result<Vec<AppInfo>, String> {
     Ok(apps)
 }
 
+/// Packages uninstalled for user 0 but still present on the device (restorable).
+/// Mirrors the Android app: `pm list packages -u --user 0` minus installed ones.
+#[tauri::command]
+async fn list_removed_apps(serial: String) -> Result<Vec<AppInfo>, String> {
+    let all = adb(vec![
+        s("-s"),
+        serial.clone(),
+        s("shell"),
+        s("pm"),
+        s("list"),
+        s("packages"),
+        s("-u"),
+        s("--user"),
+        s("0"),
+    ])
+    .await?;
+    let installed = adb(vec![
+        s("-s"),
+        serial.clone(),
+        s("shell"),
+        s("pm"),
+        s("list"),
+        s("packages"),
+        s("--user"),
+        s("0"),
+    ])
+    .await
+    .unwrap_or_default();
+
+    let installed: std::collections::HashSet<String> = installed
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("package:"))
+        .map(|p| p.trim().to_string())
+        .collect();
+
+    let labels: std::collections::HashMap<String, BridgeApp> =
+        std::fs::read_to_string(bridge_json_path(&serial))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<BridgeApp>>(&raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|b| (b.package.clone(), b))
+            .collect();
+
+    let mut apps = Vec::new();
+    for line in all.lines() {
+        let Some(rest) = line.trim().strip_prefix("package:") else {
+            continue;
+        };
+        let pkg = rest.trim().to_string();
+        if pkg.is_empty() || installed.contains(&pkg) {
+            continue;
+        }
+        let mut app = AppInfo {
+            label: pretty_label(&pkg),
+            version: None,
+            apk_path: None,
+            system: false,
+            disabled: false,
+            removed: true,
+            uad: uad_removal(&pkg),
+            package: pkg.clone(),
+        };
+        if let Some(b) = labels.get(&pkg) {
+            if let Some(label) = &b.label {
+                if !label.trim().is_empty() && label != "null" {
+                    app.label = label.clone();
+                }
+            }
+            if let Some(version) = &b.version {
+                if !version.trim().is_empty() && version != "null" {
+                    app.version = Some(version.clone());
+                }
+            }
+        }
+        apps.push(app);
+    }
+    apps.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    Ok(apps)
+}
+
+/// One permission entry shown by the permissions manager.
+#[derive(serde::Serialize)]
+struct PermissionInfo {
+    name: String,
+    granted: bool,
+    /// runtime / install / requested
+    kind: String,
+    dangerous: bool,
+    group: Option<String>,
+    #[serde(default)]
+    flags: Vec<String>,
+}
+
+struct PermState {
+    granted: bool,
+    kind: String,
+    flags: Vec<String>,
+}
+
+fn valid_permission(perm: &str) -> bool {
+    !perm.is_empty()
+        && perm.len() < 200
+        && perm.contains('.')
+        && perm
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+}
+
+/// Parse `pm list permissions -g -d` into permission -> group.
+fn parse_dangerous_permissions(raw: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let mut group: Option<String> = None;
+    for line in raw.lines() {
+        let t = line.trim();
+        if let Some(g) = t.strip_prefix("group:") {
+            group = Some(g.trim().to_string());
+        } else if let Some(p) = t.strip_prefix("permission:") {
+            let name = p.trim().to_string();
+            if valid_permission(&name) {
+                if let Some(g) = &group {
+                    map.insert(name, g.clone());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Parse `dumpsys package <pkg>` for requested / install / runtime permissions.
+/// Runtime permissions are read from the `User 0:` block only.
+fn parse_package_permissions(
+    dump: &str,
+    dangerous: &std::collections::HashMap<String, String>,
+) -> Vec<PermissionInfo> {
+    let mut requested: Vec<String> = Vec::new();
+    let mut states: std::collections::HashMap<String, PermState> = std::collections::HashMap::new();
+    let mut section = String::new();
+    let mut user0 = true;
+    let mut pending: Option<(String, bool, String, Vec<String>)> = None;
+
+    fn finish(
+        states: &mut std::collections::HashMap<String, PermState>,
+        pending: &mut Option<(String, bool, String, Vec<String>)>,
+    ) {
+        if let Some((name, granted, kind, flags)) = pending.take() {
+            let entry = states.entry(name).or_insert_with(|| PermState {
+                granted,
+                kind: kind.clone(),
+                flags: Vec::new(),
+            });
+            if granted {
+                entry.granted = true;
+            }
+            if entry.kind != "runtime" {
+                entry.kind = kind;
+            }
+            for f in flags {
+                if !entry.flags.contains(&f) {
+                    entry.flags.push(f);
+                }
+            }
+        }
+    }
+
+    for raw in dump.lines() {
+        let t = raw.trim();
+        if pending.is_some() {
+            let (name, granted, kind, mut flags) = pending.take().unwrap();
+            let cleaned = t.trim_end_matches(']').trim();
+            if !cleaned.is_empty() {
+                for f in cleaned.split('|').map(str::trim).filter(|f| !f.is_empty()) {
+                    if !flags.iter().any(|x| x == f) {
+                        flags.push(f.to_string());
+                    }
+                }
+            }
+            pending = Some((name, granted, kind, flags));
+            if t.ends_with(']') {
+                finish(&mut states, &mut pending);
+            }
+            continue;
+        }
+
+        if let Some(rest) = t.strip_prefix("User ") {
+            if let Some(idx) = rest.find(':') {
+                user0 = rest[..idx].trim() == "0";
+                section.clear();
+                continue;
+            }
+        }
+        if t == "requested permissions:" {
+            section = "requested".into();
+            continue;
+        }
+        if t == "install permissions:" {
+            section = "install".into();
+            continue;
+        }
+        if t == "runtime permissions:" {
+            section = if user0 { "runtime".into() } else { "skip".into() };
+            continue;
+        }
+        if t.ends_with(':')
+            && !t.starts_with("android.")
+            && !t.starts_with("com.")
+            && !t.starts_with("org.")
+        {
+            section.clear();
+            continue;
+        }
+
+        if section == "requested" {
+            if valid_permission(t) && !requested.iter().any(|p| p == t) {
+                requested.push(t.to_string());
+            }
+            continue;
+        }
+        if section != "install" && section != "runtime" {
+            continue;
+        }
+        let Some((name, rest)) = t.split_once(": granted=") else { continue };
+        if !valid_permission(name) {
+            continue;
+        }
+        let granted = rest.trim_start().starts_with("true");
+        let kind = if section == "runtime" { "runtime" } else { "install" }.to_string();
+        let flags_idx = rest.find("flags=[");
+        let mut collected: Vec<String> = Vec::new();
+        let is_open = if let Some(idx) = flags_idx {
+            let after = &rest[idx + "flags=[".len()..];
+            let body = after.trim_end();
+            let open = !body.contains(']');
+            for f in body.trim_end_matches(']').split('|').map(str::trim) {
+                if !f.is_empty() {
+                    collected.push(f.to_string());
+                }
+            }
+            open
+        } else {
+            false
+        };
+        if is_open {
+            pending = Some((name.to_string(), granted, kind, collected));
+        } else {
+            let entry = states.entry(name.to_string()).or_insert_with(|| PermState {
+                granted,
+                kind: kind.clone(),
+                flags: Vec::new(),
+            });
+            if granted {
+                entry.granted = true;
+            }
+            if entry.kind != "runtime" {
+                entry.kind = kind;
+            }
+            for f in collected {
+                if !entry.flags.contains(&f) {
+                    entry.flags.push(f);
+                }
+            }
+        }
+    }
+    finish(&mut states, &mut pending);
+
+    let mut names = requested;
+    for name in states.keys() {
+        if !names.iter().any(|p| p == name) {
+            names.push(name.clone());
+        }
+    }
+
+    let mut out = Vec::new();
+    for name in names {
+        let state = states.remove(&name);
+        let (granted, kind, flags) = match state {
+            Some(s) => (s.granted, s.kind, s.flags),
+            None => (false, "requested".to_string(), Vec::new()),
+        };
+        let group = dangerous.get(&name).cloned();
+        out.push(PermissionInfo {
+            dangerous: group.is_some(),
+            group,
+            name,
+            granted,
+            kind,
+            flags,
+        });
+    }
+    out.sort_by(|a, b| {
+        let rank = |k: &str| match k {
+            "runtime" => 0,
+            "install" => 1,
+            _ => 2,
+        };
+        rank(&a.kind)
+            .cmp(&rank(&b.kind))
+            .then_with(|| b.dangerous.cmp(&a.dangerous))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out
+}
+
+fn list_permissions_blocking(serial: &str, package: &str) -> Result<Vec<PermissionInfo>, String> {
+    if !valid_package(package) {
+        return Err("اسم حزمة غير صالح".into());
+    }
+    let installed = run_adb(&[
+        s("-s"),
+        s(serial),
+        s("shell"),
+        s("pm"),
+        s("list"),
+        s("packages"),
+        s("--user"),
+        s("0"),
+    ])?;
+    if !installed
+        .lines()
+        .any(|l| l.trim() == format!("package:{package}"))
+    {
+        return Err(format!("التطبيق {package} غير مثبّت للمستخدم 0"));
+    }
+    let dump = run_adb(&[
+        s("-s"),
+        s(serial),
+        s("shell"),
+        s("dumpsys"),
+        s("package"),
+        s(package),
+    ])?;
+    if !dump.contains("requested permissions:") && !dump.contains("runtime permissions:") {
+        return Err(format!("لم يتم العثور على صلاحيات للحزمة {package}"));
+    }
+    let dangerous_raw = run_adb(&[
+        s("-s"),
+        s(serial),
+        s("shell"),
+        s("pm"),
+        s("list"),
+        s("permissions"),
+        s("-g"),
+        s("-d"),
+    ])
+    .unwrap_or_default();
+    let dangerous = parse_dangerous_permissions(&dangerous_raw);
+    Ok(parse_package_permissions(&dump, &dangerous))
+}
+
+#[tauri::command]
+async fn list_permissions(serial: String, package: String) -> Result<Vec<PermissionInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_permissions_blocking(&serial, &package))
+        .await
+        .map_err(|e| format!("خطأ داخلي: {e}"))?
+}
+
+fn set_permissions_blocking(
+    serial: &str,
+    package: &str,
+    permissions: &[String],
+    granted: bool,
+) -> Result<serde_json::Value, String> {
+    if !valid_package(package) {
+        return Err("اسم حزمة غير صالح".into());
+    }
+    let verb = if granted { "grant" } else { "revoke" };
+    let mut ok = 0u32;
+    let mut failed = Vec::new();
+    for perm in permissions {
+        if !valid_permission(perm) {
+            failed.push(serde_json::json!({
+                "permission": perm,
+                "error": "اسم صلاحية غير صالح"
+            }));
+            continue;
+        }
+        let res = run_adb(&[
+            s("-s"),
+            s(serial),
+            s("shell"),
+            s("pm"),
+            s(verb),
+            s(package),
+            s(perm),
+        ]);
+        match res {
+            Ok(out) => {
+                let text = out.trim();
+                if text.contains("Exception")
+                    || text.contains("Error")
+                    || text.contains("Failure")
+                    || text.contains("not a changeable")
+                {
+                    failed.push(serde_json::json!({
+                        "permission": perm,
+                        "error": text
+                    }));
+                } else {
+                    ok += 1;
+                }
+            }
+            Err(e) => failed.push(serde_json::json!({
+                "permission": perm,
+                "error": e
+            })),
+        }
+    }
+    Ok(serde_json::json!({ "ok": ok, "failed": failed }))
+}
+
+#[tauri::command]
+async fn set_permissions(
+    serial: String,
+    package: String,
+    permissions: Vec<String>,
+    granted: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        set_permissions_blocking(&serial, &package, &permissions, granted)
+    })
+    .await
+    .map_err(|e| format!("خطأ داخلي: {e}"))?
+}
+
 #[tauri::command]
 async fn app_action(serial: String, package: String, action: String) -> Result<String, String> {
     if !valid_package(&package) {
         return Err("اسم حزمة غير صالح".into());
+    }
+    if action == "uninstall_deep" {
+        // Best-effort factory removal, identical to the Android version:
+        // drop system updates, stop the app, then uninstall for user 0.
+        let _ = adb(vec![
+            s("-s"),
+            serial.clone(),
+            s("shell"),
+            s("pm"),
+            s("uninstall-system-updates"),
+            s(&package),
+        ])
+        .await;
+        let _ = adb(vec![
+            s("-s"),
+            serial.clone(),
+            s("shell"),
+            s("am"),
+            s("force-stop"),
+            s(&package),
+        ])
+        .await;
+        let out = adb(vec![
+            s("-s"),
+            serial.clone(),
+            s("shell"),
+            s("pm"),
+            s("uninstall"),
+            s("--user"),
+            s("0"),
+            s(&package),
+        ])
+        .await
+        .unwrap_or_default();
+
+        // `-u` keeps listing system packages whose /system copy remains.
+        let left = adb(vec![
+            s("-s"),
+            serial,
+            s("shell"),
+            s("pm"),
+            s("list"),
+            s("packages"),
+            s("-u"),
+            s("--user"),
+            s("0"),
+        ])
+        .await
+        .unwrap_or_default();
+        let still_present = left
+            .lines()
+            .any(|l| l.trim() == format!("package:{package}"));
+        if !still_present {
+            return Ok(format!("تم الحذف النهائي: {package}"));
+        }
+        if out.contains("Failure") || out.contains("Error") || out.contains("Exception") {
+            return Err(format!(
+                "أُزيلت تحديثات النظام، لكن تعذّر الحذف الكامل — نسخة /system تتطلب روت.\n{}",
+                out.trim()
+            ));
+        }
+        return Ok(format!(
+            "أُزيل {package} للمستخدم 0 — نسخة المصنع تبقى في النظام (إزالتها الكاملة تتطلب روت)"
+        ));
     }
     if action == "clear_cache" {
         let script = format!(
@@ -557,6 +1248,7 @@ async fn app_action(serial: String, package: String, action: String) -> Result<S
         ]),
         "clear_data" => args.extend([s("clear"), s("--user"), s("0"), package]),
         "clear_cache" => args.extend([s("clear"), s("--cache-only"), s("--user"), s("0"), package]),
+        "restore" => args.extend([s("install-existing"), s("--user"), s("0"), package]),
         _ => return Err("إجراء غير معروف".into()),
     }
     let out = adb(args).await?;
@@ -579,65 +1271,213 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
-fn extract_apk_blocking(serial: &str, package: &str) -> Result<String, String> {
-    if !valid_package(package) {
-        return Err("اسم حزمة غير صالح".into());
+/// File base name used when saving an app, matching ADB AppControl:
+/// `<App label> (<package>) [v.<version>]`.
+fn apk_base_name(label: Option<&str>, package: &str, version: Option<&str>) -> String {
+    let mut cleaned = String::new();
+    for ch in label.unwrap_or("").chars() {
+        if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+            cleaned.push(' ');
+        } else {
+            cleaned.push(ch);
+        }
     }
-    let paths = run_adb(&[
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut base = if cleaned.is_empty() {
+        package.to_string()
+    } else {
+        format!("{cleaned} ({package})")
+    };
+    let version = version.unwrap_or("").trim();
+    if !version.is_empty() {
+        base = format!("{base} [v.{version}]");
+    }
+    if base.chars().count() > 150 {
+        base = base.chars().take(150).collect();
+    }
+    let trimmed = base.trim_end_matches([' ', '.']).to_string();
+    if trimmed.is_empty() {
+        package.to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn adb_pull(serial: &str, remote: &str, dest: &std::path::Path) -> Result<(), String> {
+    let out = run_adb(&[
         s("-s"),
         serial.to_string(),
+        s("pull"),
+        s(remote),
+        dest.to_string_lossy().to_string(),
+    ])?;
+    let lower = out.to_lowercase();
+    if lower.contains("file pulled")
+        || lower.contains("files pulled")
+        || lower.contains("skipped")
+    {
+        Ok(())
+    } else {
+        Err(out.trim().to_string())
+    }
+}
+
+/// Android 11+ often denies pulling `/data/app/...` directly. Copy the whole
+/// install directory to shared storage, pull that, then remove the copy.
+fn pull_app_dir_via_storage(
+    serial: &str,
+    remote_dir: &str,
+    tmp: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let dir_name = remote_dir
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("app");
+    let staging = format!("/storage/emulated/0/{dir_name}");
+    let _ = run_adb(&[
+        s("-s"),
+        serial.to_string(),
+        s("shell"),
+        s("rm"),
+        s("-R"),
+        s(&staging),
+    ]);
+    run_adb(&[
+        s("-s"),
+        serial.to_string(),
+        s("shell"),
+        s("cp"),
+        s("-r"),
+        s(remote_dir),
+        s("/storage/emulated/0"),
+    ])?;
+    let local = tmp.join(dir_name);
+    let pulled = run_adb(&[
+        s("-s"),
+        serial.to_string(),
+        s("pull"),
+        s(&staging),
+        s(&local.to_string_lossy()),
+    ]);
+    let _ = run_adb(&[
+        s("-s"),
+        serial.to_string(),
+        s("shell"),
+        s("rm"),
+        s("-R"),
+        s(&staging),
+    ]);
+    if let Err(e) = pulled {
+        return Err(e);
+    }
+    if !local.is_dir() {
+        return Err("تعذر نسخ ملفات APK من الجهاز".into());
+    }
+    Ok(local)
+}
+
+fn pull_package_parts(
+    serial: &str,
+    package: &str,
+    tmp: &std::path::Path,
+) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    let paths = run_adb(&[
+        s("-s"),
+        s(serial),
         s("shell"),
         s("pm"),
         s("path"),
         s(package),
     ])?;
 
-    let dir = download_dir().join("adb-appcontrol-apks");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    let tmp = cache_dir()
-        .join("tmp")
-        .join(format!("{}-{}", safe_serial(package), timestamp()));
-    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-
-    let mut parts: Vec<(String, std::path::PathBuf)> = Vec::new();
-    for line in paths.lines() {
-        let Some(remote) = line.trim().strip_prefix("package:") else {
-            continue;
-        };
-        let name = sanitize_file_name(remote.rsplit('/').next().unwrap_or("part.apk"));
-        let dest = tmp.join(&name);
-        let out = run_adb(&[
-            s("-s"),
-            serial.to_string(),
-            s("pull"),
-            s(remote),
-            dest.to_string_lossy().to_string(),
-        ])?;
-        if out.to_lowercase().contains("error") {
-            let _ = std::fs::remove_dir_all(&tmp);
-            return Err(out);
-        }
-        parts.push((name, dest));
-    }
-
-    if parts.is_empty() {
-        let _ = std::fs::remove_dir_all(&tmp);
+    let remotes: Vec<String> = paths
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("package:"))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if remotes.is_empty() {
         return Err("لم يتم العثور على مسار APK".into());
     }
 
-    let result = if parts.len() == 1 {
-        let dest = dir.join(format!("{package}.apk"));
-        let _ = std::fs::remove_file(&dest);
-        std::fs::copy(&parts[0].1, &dest).map_err(|e| e.to_string())?;
-        dest.to_string_lossy().to_string()
-    } else {
-        // Split APK (Android App Bundle): pack all parts into one .apks archive.
-        let dest = dir.join(format!("{package}.apks"));
+    // Pull every original APK, keeping its original file name.
+    let mut parts: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for remote in &remotes {
+        let name = remote.rsplit('/').next().unwrap_or("part.apk").to_string();
+        let dest = tmp.join(&name);
+        if adb_pull(serial, remote, &dest).is_ok() {
+            parts.push((name, dest));
+        } else {
+            parts.clear();
+            break;
+        }
+    }
+
+    if parts.len() != remotes.len() {
+        // Direct pull failed: stage the install directory on shared storage.
+        let remote_dir = remotes[0]
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_string())
+            .unwrap_or_default();
+        if remote_dir.is_empty() {
+            return Err("تعذر قراءة مجلد التطبيق على الجهاز".into());
+        }
+        let staged = pull_app_dir_via_storage(serial, &remote_dir, tmp)?;
+        parts.clear();
+        for remote in &remotes {
+            let name = remote.rsplit('/').next().unwrap_or("part.apk").to_string();
+            let src = staged.join(&name);
+            if !src.is_file() {
+                return Err(format!("لم يتم العثور على الملف {name} على الجهاز"));
+            }
+            parts.push((name, src));
+        }
+    }
+    Ok(parts)
+}
+
+fn extract_apk_blocking(
+    serial: &str,
+    package: &str,
+    label: Option<&str>,
+    version: Option<&str>,
+) -> Result<String, String> {
+    if !valid_package(package) {
+        return Err("اسم حزمة غير صالح".into());
+    }
+
+    let dir = download_dir().join("adb-appcontrol-apks");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = cache_dir().join("tmp").join(format!(
+        "{}-{}-{counter}",
+        safe_serial(package),
+        timestamp()
+    ));
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+
+    let base = apk_base_name(label, package, version);
+
+    let result = (|| -> Result<String, String> {
+        let parts = pull_package_parts(serial, package, &tmp)?;
+
+        if parts.len() == 1 {
+            let dest = dir.join(format!("{base}.apk"));
+            let _ = std::fs::remove_file(&dest);
+            std::fs::copy(&parts[0].1, &dest).map_err(|e| e.to_string())?;
+            return Ok(dest.to_string_lossy().to_string());
+        }
+
+        // Split package (App Bundle): archive the untouched original APK files,
+        // keeping their original names, exactly like ADB AppControl.
+        let dest = dir.join(format!("{base}.apks"));
         let file = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
         let mut writer = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
         for (name, path) in &parts {
             writer
                 .start_file(name.clone(), options)
@@ -646,20 +1486,329 @@ fn extract_apk_blocking(serial: &str, package: &str) -> Result<String, String> {
             std::io::copy(&mut f, &mut writer).map_err(|e| e.to_string())?;
         }
         writer.finish().map_err(|e| e.to_string())?;
-        format!(
-            "{}  ({} أجزاء مدمجة في ملف واحد)",
+        Ok(format!(
+            "{}  ({} ملفات APK أصلية)",
             dest.display(),
             parts.len()
-        )
-    };
+        ))
+    })();
 
     let _ = std::fs::remove_dir_all(&tmp);
-    Ok(result)
+    result
 }
 
 #[tauri::command]
-async fn extract_apk(serial: String, package: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || extract_apk_blocking(&serial, &package))
+async fn extract_apk(
+    serial: String,
+    package: String,
+    label: Option<String>,
+    version: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        extract_apk_blocking(
+            &serial,
+            &package,
+            label.as_deref(),
+            version.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("خطأ داخلي: {e}"))?
+}
+
+#[derive(serde::Deserialize)]
+struct BackupTarget {
+    package: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// Create `backup-<stamp>.zip` containing every selected app's untouched APKs
+/// under a per-app folder, plus a `backup.json` manifest.
+fn backup_apps_blocking(
+    serial: &str,
+    targets: Vec<BackupTarget>,
+) -> Result<serde_json::Value, String> {
+    if targets.is_empty() {
+        return Err("لم يتم تحديد تطبيقات للنسخ الاحتياطي".into());
+    }
+
+    let stamp = utc_stamp();
+    let dir = download_dir().join("adb-appcontrol-backups");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let zip_path = dir.join(format!("backup-{stamp}.zip"));
+
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = cache_dir()
+        .join("backup")
+        .join(format!("{stamp}-{counter}"));
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+
+    let result = (|| -> Result<serde_json::Value, String> {
+        use std::io::Write as _;
+
+        let file = std::fs::File::create(&zip_path).map_err(|e| e.to_string())?;
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
+
+        let mut apps_meta: Vec<serde_json::Value> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
+        let mut used_folders: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut ok = 0u32;
+
+        for (index, target) in targets.iter().enumerate() {
+            if !valid_package(&target.package) {
+                failures.push(format!("{}: اسم حزمة غير صالح", target.package));
+                continue;
+            }
+            let app_tmp = tmp.join(format!("app-{index}"));
+            if let Err(e) = std::fs::create_dir_all(&app_tmp) {
+                failures.push(format!("{}: {e}", target.package));
+                continue;
+            }
+
+            let pulled = pull_package_parts(serial, &target.package, &app_tmp);
+            let parts = match pulled {
+                Ok(parts) => parts,
+                Err(e) => {
+                    failures.push(format!("{}: {e}", target.package));
+                    let _ = std::fs::remove_dir_all(&app_tmp);
+                    continue;
+                }
+            };
+
+            let base = apk_base_name(
+                target.label.as_deref(),
+                &target.package,
+                target.version.as_deref(),
+            );
+            let mut folder = base.clone();
+            let mut n = 2;
+            while !used_folders.insert(folder.clone()) {
+                folder = format!("{base} ({n})");
+                n += 1;
+            }
+
+            let mut files: Vec<String> = Vec::new();
+            for (name, path) in &parts {
+                writer
+                    .start_file(format!("{folder}/{name}"), options)
+                    .map_err(|e| e.to_string())?;
+                let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                std::io::copy(&mut f, &mut writer).map_err(|e| e.to_string())?;
+                files.push(name.clone());
+            }
+
+            apps_meta.push(serde_json::json!({
+                "package": target.package,
+                "label": target.label,
+                "version": target.version,
+                "folder": folder,
+                "files": files
+            }));
+            ok += 1;
+            let _ = std::fs::remove_dir_all(&app_tmp);
+        }
+
+        if ok == 0 {
+            let detail = if failures.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", failures.join("\n"))
+            };
+            return Err(format!("تعذّر سحب أي تطبيق للنسخة الاحتياطية{detail}"));
+        }
+
+        let meta = serde_json::json!({
+            "format": 1,
+            "app": "ADB Control",
+            "created": stamp,
+            "created_unix": timestamp(),
+            "device": serial,
+            "apps": apps_meta
+        });
+        let raw = serde_json::to_vec_pretty(&meta).map_err(|e| e.to_string())?;
+        writer
+            .start_file("backup.json", options)
+            .map_err(|e| e.to_string())?;
+        writer.write_all(&raw).map_err(|e| e.to_string())?;
+        writer.finish().map_err(|e| e.to_string())?;
+
+        Ok(serde_json::json!({
+            "path": zip_path.to_string_lossy().to_string(),
+            "ok": ok,
+            "failed": failures
+        }))
+    })();
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&zip_path);
+    }
+    result
+}
+
+#[tauri::command]
+async fn backup_apps(
+    serial: String,
+    apps: Vec<BackupTarget>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || backup_apps_blocking(&serial, apps))
+        .await
+        .map_err(|e| format!("خطأ داخلي: {e}"))?
+}
+
+#[tauri::command]
+async fn presets_dir() -> Result<String, String> {
+    let dir = download_dir().join("adb-appcontrol-presets");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[derive(serde::Deserialize)]
+struct PresetEntry {
+    package: String,
+    #[serde(default)]
+    disabled: bool,
+    #[serde(default)]
+    removed: bool,
+}
+
+fn save_preset_blocking(
+    path: &str,
+    apps: Vec<PresetEntry>,
+    stamp: Option<&str>,
+    comment: Option<&str>,
+) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Err("مسار ملف غير صالح".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut enabled: Vec<String> = Vec::new();
+    let mut disabled: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    for app in apps {
+        let package = app.package.trim().to_string();
+        if !valid_package(&package) || !seen.insert(package.clone()) {
+            continue;
+        }
+        if app.removed {
+            removed.push(package);
+        } else if app.disabled {
+            disabled.push(package);
+        } else {
+            enabled.push(package);
+        }
+    }
+    let total = enabled.len() + disabled.len() + removed.len();
+    if total == 0 {
+        return Err("لا توجد حزم صالحة لحفظها في Preset".into());
+    }
+    for list in [&mut enabled, &mut disabled, &mut removed] {
+        list.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    }
+
+    let mut text = String::new();
+    // Same header as ADB AppControl 1.8.6, so presets are interchangeable.
+    text.push_str("# Preset created in ADB Control\n");
+    text.push_str(&format!("# Total applications: {total}\n"));
+    let stamp = stamp
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(utc_stamp);
+    text.push_str(&format!("# {stamp}\n"));
+    if let Some(comment) = comment.map(str::trim).filter(|c| !c.is_empty()) {
+        text.push_str(&format!("# {comment}\n"));
+    }
+
+    // When the list mixes enabled/disabled/uninstalled apps (the "All" tab),
+    // record each state explicitly. Lines starting with '#' are comments, so
+    // older/stock preset readers still see a plain package list.
+    let has_state_sections = !disabled.is_empty() || !removed.is_empty();
+    if has_state_sections {
+        text.push_str(&format!("# Enabled applications: {}\n", enabled.len()));
+        text.push_str(&format!("# Disabled applications: {}\n", disabled.len()));
+        if !removed.is_empty() {
+            text.push_str(&format!("# Uninstalled applications: {}\n", removed.len()));
+        }
+        text.push('\n');
+
+        let mut section = |title: &str, list: &[String]| {
+            if list.is_empty() {
+                return;
+            }
+            text.push_str(&format!("# {title}\n"));
+            for pkg in list {
+                text.push_str(pkg);
+                text.push('\n');
+            }
+            text.push('\n');
+        };
+        section("Enabled applications", &enabled);
+        section("Disabled applications", &disabled);
+        section("Uninstalled applications", &removed);
+    } else {
+        for pkg in &enabled {
+            text.push_str(pkg);
+            text.push('\n');
+        }
+    }
+
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    std::fs::write(path, text).map_err(|e| e.to_string())?;
+    Ok(format!("تم حفظ Preset ({total}) في {path}"))
+}
+
+#[tauri::command]
+async fn save_preset(
+    path: String,
+    apps: Vec<PresetEntry>,
+    stamp: Option<String>,
+    comment: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_preset_blocking(&path, apps, stamp.as_deref(), comment.as_deref())
+    })
+    .await
+    .map_err(|e| format!("خطأ داخلي: {e}"))?
+}
+
+fn load_preset_blocking(path: &str) -> Result<Vec<String>, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("تعذّر قراءة الملف: {e}"))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut packages = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Tolerate comma/space-separated lists and trailing comments.
+        for token in line.split(|c: char| c == ',' || c.is_whitespace()) {
+            let pkg = token.trim();
+            if valid_package(pkg) && seen.insert(pkg.to_string()) {
+                packages.push(pkg.to_string());
+            }
+        }
+    }
+    if packages.is_empty() {
+        return Err("الملف لا يحتوي على أسماء حزم صالحة".into());
+    }
+    Ok(packages)
+}
+
+#[tauri::command]
+async fn load_preset(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || load_preset_blocking(&path))
         .await
         .map_err(|e| format!("خطأ داخلي: {e}"))?
 }
@@ -1554,7 +2703,7 @@ fn main() {
 
     if args.iter().any(|a| a == "--extract") {
         match (args.get(2), args.get(3)) {
-            (Some(serial), Some(package)) => match extract_apk_blocking(serial, package) {
+            (Some(serial), Some(package)) => match extract_apk_blocking(serial, package, None, None) {
                 Ok(path) => println!("{path}"),
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -1563,6 +2712,58 @@ fn main() {
             },
             _ => {
                 eprintln!("usage: --extract <serial> <package>");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    if args.iter().any(|a| a == "--permissions") {
+        match (args.get(2), args.get(3)) {
+            (Some(serial), Some(package)) => {
+                match list_permissions_blocking(serial, package) {
+                    Ok(list) => match serde_json::to_string_pretty(&list) {
+                        Ok(raw) => println!("{raw}"),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            _ => {
+                eprintln!("usage: --permissions <serial> <package>");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    if args.iter().any(|a| a == "--setperm") {
+        match (args.get(2), args.get(3), args.get(4), args.get(5)) {
+            (Some(serial), Some(package), Some(mode), Some(perm)) => {
+                let granted = match mode.as_str() {
+                    "grant" => true,
+                    "revoke" => false,
+                    _ => {
+                        eprintln!("mode must be grant or revoke");
+                        std::process::exit(2);
+                    }
+                };
+                match set_permissions_blocking(serial, package, &[perm.clone()], granted) {
+                    Ok(value) => println!("{value}"),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            _ => {
+                eprintln!("usage: --setperm <serial> <package> <grant|revoke> <permission>");
                 std::process::exit(2);
             }
         }
@@ -1610,9 +2811,19 @@ fn main() {
             disable_wireless,
             disconnect_device,
             device_info,
+            device_memory,
+            list_processes,
+            kill_process,
             list_apps,
+            list_removed_apps,
+            list_permissions,
+            set_permissions,
             app_action,
             extract_apk,
+            backup_apps,
+            presets_dir,
+            save_preset,
+            load_preset,
             install_apks,
             screenshot,
             logcat,
@@ -1624,4 +2835,134 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("فشل تشغيل التطبيق");
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+
+    #[test]
+    fn utc_date_conversion_starts_at_epoch() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(utc_stamp().len(), 15);
+    }
+
+    #[test]
+    fn preset_roundtrip_dedupes_and_skips_invalid_packages() {
+        let path = std::env::temp_dir().join(format!(
+            "adbac-preset-{}-{}.txt",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path_str = path.to_string_lossy().to_string();
+        save_preset_blocking(
+            &path_str,
+            vec![
+                PresetEntry {
+                    package: "com.example.one".into(),
+                    disabled: false,
+                    removed: false,
+                },
+                PresetEntry {
+                    package: "com.example.one".into(),
+                    disabled: true,
+                    removed: false,
+                },
+                PresetEntry {
+                    package: "com.example.off".into(),
+                    disabled: true,
+                    removed: false,
+                },
+                PresetEntry {
+                    package: "com.example.gone".into(),
+                    disabled: false,
+                    removed: true,
+                },
+                PresetEntry {
+                    package: "bad package".into(),
+                    disabled: false,
+                    removed: false,
+                },
+            ],
+            Some("2026-11-12_22:22:03"),
+            Some("Description"),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# Preset created in ADB Control"));
+        assert!(raw.contains("# Total applications: 3"));
+        assert!(raw.contains("# 2026-11-12_22:22:03"));
+        assert!(raw.contains("# Description"));
+        assert!(raw.contains("# Enabled applications: 1"));
+        assert!(raw.contains("# Disabled applications: 1"));
+        assert!(raw.contains("# Uninstalled applications: 1"));
+        let enabled_pos = raw.find("# Enabled applications\n").unwrap();
+        let disabled_pos = raw.find("# Disabled applications\n").unwrap();
+        assert!(enabled_pos < disabled_pos);
+        assert!(raw[enabled_pos..disabled_pos].contains("com.example.one"));
+        assert!(raw[disabled_pos..].contains("com.example.off"));
+        let list = load_preset_blocking(&path_str).unwrap();
+        assert_eq!(
+            list,
+            vec![
+                "com.example.one".to_string(),
+                "com.example.off".to_string(),
+                "com.example.gone".to_string()
+            ]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn parses_requested_install_and_user0_runtime_permissions() {
+        let dump = r#"
+    requested permissions:
+      android.permission.CAMERA
+      android.permission.POST_NOTIFICATIONS
+      android.permission.WAKE_LOCK
+    install permissions:
+      android.permission.WAKE_LOCK: granted=true
+    User 0: ceDataInode=1 installed=true
+      runtime permissions:
+        android.permission.CAMERA: granted=false, flags=[ USER_SET]
+        android.permission.POST_NOTIFICATIONS: granted=true, flags=[ 
+USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]
+    User 10: installed=false
+      runtime permissions:
+        android.permission.CAMERA: granted=true
+"#;
+        let dangerous = parse_dangerous_permissions(
+            "Dangerous Permissions:\n\ngroup:android.permission-group.CAMERA\n  permission:android.permission.CAMERA\n\ngroup:android.permission-group.NOTIFICATIONS\n  permission:android.permission.POST_NOTIFICATIONS\n",
+        );
+        let list = parse_package_permissions(dump, &dangerous);
+        assert_eq!(list.len(), 3);
+
+        let camera = list.iter().find(|p| p.name.ends_with("CAMERA")).unwrap();
+        assert_eq!(camera.kind, "runtime");
+        assert!(!camera.granted);
+        assert!(camera.dangerous);
+        assert_eq!(
+            camera.group.as_deref(),
+            Some("android.permission-group.CAMERA")
+        );
+        assert_eq!(camera.flags, vec!["USER_SET"]);
+
+        let post = list
+            .iter()
+            .find(|p| p.name.ends_with("POST_NOTIFICATIONS"))
+            .unwrap();
+        assert_eq!(post.kind, "runtime");
+        assert!(post.granted);
+        assert_eq!(post.flags.len(), 2);
+
+        let wake = list.iter().find(|p| p.name.ends_with("WAKE_LOCK")).unwrap();
+        assert_eq!(wake.kind, "install");
+        assert!(wake.granted);
+        assert!(!wake.dangerous);
+    }
 }

@@ -54,6 +54,6 @@
     },
     "category": "Utility",
     "shortDescription": "Manage Android devices over ADB",
-    "longDescription": "Open-source Linux alternative to ADB AppControl: app management, debloat, APK install/extract, screenshots and logcat."
+    "longDescription": "Open-source ADB AppControl alternative: app management, deep uninstall/restore, debloat, APK install/extract, screenshots, logcat and Arabic/English UI."
   }
 }

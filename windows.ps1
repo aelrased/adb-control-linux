@@ -1,4 +1,4 @@
-# بناء وتشغيل ADB AppControl على ويندوز
+﻿# بناء وتشغيل ADB AppControl على ويندوز
 # الاستخدام:
 #   powershell -ExecutionPolicy Bypass -File .\windows.ps1
 #   powershell -ExecutionPolicy Bypass -File .\windows.ps1 -Run
@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 Write-Host "==> التحقق من Rust" -ForegroundColor Cyan
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -25,14 +26,28 @@ if (Test-Path $bundled) {
 }
 
 Write-Host "==> تجهيز Tauri CLI" -ForegroundColor Cyan
-if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
-    cargo install tauri-cli --version "^2" --locked
+$tauriArgs = @()
+if (Get-Command cargo-tauri -ErrorAction SilentlyContinue) {
+    $tauriExe = "cargo"
+    $tauriArgs = @("tauri")
+} elseif (Get-Command tauri -ErrorAction SilentlyContinue) {
+    $tauriExe = "tauri"
+} else {
+    Write-Host "    لم يُوجد Tauri CLI — سيُثبَّت عبر npm (أسرع) أو cargo." -ForegroundColor Yellow
+    if (Get-Command npm -ErrorAction SilentlyContinue) {
+        npm install -g "@tauri-apps/cli@^2" --no-fund --no-audit
+        $tauriExe = "tauri"
+    } else {
+        cargo install tauri-cli --version "^2" --locked
+        $tauriExe = "cargo"
+        $tauriArgs = @("tauri")
+    }
 }
 
 Write-Host "==> بناء الإصدار (NSIS + MSI)" -ForegroundColor Cyan
 Push-Location src-tauri
 try {
-    cargo tauri build
+    & $tauriExe @tauriArgs build
 } finally {
     Pop-Location
 }

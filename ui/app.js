@@ -1,4 +1,4 @@
-/* ADB AppControl — Linux frontend
+/* ADB Control — Desktop frontend
    SPDX-License-Identifier: GPL-3.0-or-later */
 
 const T = window.__TAURI__;
@@ -19,7 +19,7 @@ const state = {
   selected: new Set(),
   busy: false,
   info: null,
-  platform: "Linux",
+  platform: "Desktop",
   memory: null,
   processes: [],
 };
@@ -1606,7 +1606,7 @@ function wire() {
 }
 
 function platformName() {
-  return /Windows/i.test(navigator.userAgent) ? "Windows" : "Linux";
+  return /Windows/i.test(navigator.userAgent) ? "Windows" : "Desktop";
 }
 
 function refreshShellText() {

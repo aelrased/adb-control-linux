@@ -1,8 +1,8 @@
 [package]
 name = "adb-appcontrol"
 version = "0.1.0"
-description = "ADB Control Linux - open-source ADB device manager"
-authors = ["ADB Control Linux contributors"]
+description = "ADB Control Desktop - open-source ADB device manager"
+authors = ["ADB Control Desktop contributors"]
 edition = "2021"
 license = "GPL-3.0-or-later"
 

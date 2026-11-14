@@ -1,4 +1,4 @@
-// ADB AppControl — Linux (open-source reimplementation)
+// ADB Control — Desktop (open-source reimplementation)
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

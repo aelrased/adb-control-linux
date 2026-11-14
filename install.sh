@@ -24,8 +24,8 @@ cat > "$HOME/.local/share/applications/$APP.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=ADB Control Linux
-Name[ar]=ADB Control Linux
+Name=ADB Control Desktop
+Name[ar]=ADB Control Desktop
 GenericName=Android Device Manager
 Comment=ADB Control for Linux - manage Android devices
 Comment[ar]=إدارة أجهزة أندرويد والتلفزيون عبر ADB

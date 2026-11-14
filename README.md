@@ -1,4 +1,4 @@
-# ADB Control Linux
+# ADB Control Desktop
 
 بديل حر ومفتوح المصدر برنامج **ADB Control** (Windows)، مبني بواجهة سطح مكتب
 حديثة على **Tauri 2 + WebKitGTK** مع نواة **Rust**، ويعتمد على أداة `adb` الرسمية من
@@ -89,7 +89,7 @@ Google (Apache‑2.0).
    **مضمّن** داخل نسخة ويندوز في `src-tauri/platform-tools/` ويُحزم مع المثبّت.
 
 ```powershell
-cd adb-appcontrol-linux
+cd adb-control-desktop
 powershell -ExecutionPolicy Bypass -File .\windows.ps1
 # أو للتشغيل مباشرة بعد البناء:
 powershell -ExecutionPolicy Bypass -File .\windows.ps1 -Run
@@ -201,14 +201,14 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ## 🚀 التشغيل
 
 ```bash
-cd adb-appcontrol-linux/src-tauri
+cd adb-control-desktop/src-tauri
 cargo run
 ```
 
 أو باستخدام Tauri CLI:
 
 ```bash
-cd adb-appcontrol-linux
+cd adb-control-desktop
 cargo tauri dev
 ```
 
@@ -222,7 +222,7 @@ ADB_PATH=/path/to/adb cargo run  # تحديد مسار adb مختلف
 ### البناء للإصدار
 
 ```bash
-cd adb-appcontrol-linux
+cd adb-control-desktop
 cargo tauri build
 # النواتج: src-tauri/target/release/adb-appcontrol
 # والحزم:  target/release/bundle/deb/*.deb و *.AppImage
@@ -233,7 +233,7 @@ cargo tauri build
 ## 🧱 البنية
 
 ```
-adb-appcontrol-linux/
+adb-control-desktop/
 ├── src-tauri/
 │   ├── Cargo.toml
 │   ├── build.rs
